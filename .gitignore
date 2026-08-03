@@ -1,0 +1,27 @@
+# Raw data — never commit. games.csv alone is 382 MB, well past GitHub's
+# 100 MB per-file limit, and the dataset is a Kaggle download anyone can fetch
+# themselves. Link to the source instead (see README).
+data/*.csv
+data/*.zip
+data/*.gz
+
+# Power BI scratch files
+*.pbix.bak
+~$*
+
+# Local credentials — never commit connection strings or passwords
+*.env
+.env
+my.cnf
+credentials.*
+
+# Windows / editor noise
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+
+# Personal study plan - not project work, and it frames the author as a
+# learner in a repo whose job is to show finished work. Kept locally.
+DA-ROADMAP.md
