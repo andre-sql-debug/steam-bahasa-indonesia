@@ -1,6 +1,6 @@
 -- Minecraft Creative Mode for RE4 Remake (REFramework Lua script)
 -- Flying (double-tap Space or F6) and no damage, like Minecraft Creative.
--- While flying: WASD = move, Space = up, Ctrl = down, Shift = fly faster.
+-- While flying (same as Minecraft): WASD = move, Space = up, Shift (or C) = down, Ctrl = fly faster.
 -- Install: copy this file to <RE4 folder>\reframework\autorun\
 -- Settings: press Insert -> Script Generated UI -> Minecraft Creative
 
@@ -12,9 +12,12 @@ local settings = {
     show_debug = false,
 }
 
+-- Windows may report Shift/Ctrl as the generic key or the left/right one, so check all of them
 local KEY = {
-    SPACE = 0x20, LCTRL = 0xA2, LSHIFT = 0xA0, F6 = 0x75,
-    W = 0x57, A = 0x41, S = 0x53, D = 0x44,
+    SPACE = { 0x20 }, F6 = { 0x75 },
+    DOWN = { 0x10, 0xA0, 0xA1, 0x43 },   -- Shift, LShift, RShift, C
+    FAST = { 0x11, 0xA2, 0xA3 },         -- Ctrl, LCtrl, RCtrl
+    W = { 0x57 }, A = { 0x41 }, S = { 0x53 }, D = { 0x44 },
 }
 local DOUBLE_TAP_FRAMES = 18   -- ~0.3 s at 60 fps
 
@@ -44,16 +47,19 @@ local function try_call(obj, method, ...)
     return nil, false
 end
 
-local function is_down(key)
-    local ok, down = pcall(function() return reframework:is_key_down(key) end)
-    return ok and down
+local function is_down(keys)
+    for _, key in ipairs(keys) do
+        local ok, down = pcall(function() return reframework:is_key_down(key) end)
+        if ok and down then return true end
+    end
+    return false
 end
 
 -- True only on the frame the key goes down
 local function pressed(key)
     local down = is_down(key)
-    local was = keys_was_down[key]
-    keys_was_down[key] = down
+    local was = keys_was_down[key[1]]
+    keys_was_down[key[1]] = down
     return down and not was
 end
 
@@ -138,10 +144,10 @@ local function update_flying(transform)
         if is_down(KEY.A) then move = move - right end
     end
     if is_down(KEY.SPACE) then move = move + Vector3f.new(0, 1, 0) end
-    if is_down(KEY.LCTRL) then move = move - Vector3f.new(0, 1, 0) end
+    if is_down(KEY.DOWN) then move = move - Vector3f.new(0, 1, 0) end
 
     local speed = settings.fly_speed
-    if is_down(KEY.LSHIFT) then speed = speed * settings.fast_multiplier end
+    if is_down(KEY.FAST) then speed = speed * settings.fast_multiplier end
 
     fly_pos = fly_pos + move * speed
     try_call(transform, "set_Position", fly_pos)
@@ -216,7 +222,7 @@ re.on_draw_ui(function()
         changed, settings.enabled = imgui.checkbox("Enabled", settings.enabled)
         changed, settings.no_damage = imgui.checkbox("No damage", settings.no_damage)
         changed, settings.fly_speed = imgui.slider_float("Fly speed", settings.fly_speed, 0.01, 0.5)
-        changed, settings.fast_multiplier = imgui.slider_float("Shift speed multiplier", settings.fast_multiplier, 1.0, 10.0)
+        changed, settings.fast_multiplier = imgui.slider_float("Ctrl speed multiplier", settings.fast_multiplier, 1.0, 10.0)
         imgui.text(flying and "Flying (double-tap Space or F6 to land)" or "Walking (double-tap Space or F6 to fly)")
         changed, settings.show_debug = imgui.checkbox("Show debug info", settings.show_debug)
         if settings.show_debug then
