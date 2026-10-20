@@ -11,6 +11,12 @@ Minecraft 1.21.1 + RE4 Bridge mod  --writes-->  RE4\reframework\data\minecraft_b
 Minecraft 1.21.1 + RE4 Bridge mod  <--reads--   RE4\reframework\data\minecraft_bridge_input.json  <--writes--  minecraft_bridge_hud.lua
 ```
 
+## Install / update (one click)
+Unzip, then double-click **`install.bat`**. It finds RE4 and your CurseForge Minecraft profile (asks if it
+can't), builds the Minecraft mod, replaces old versions, tells the mod where RE4 is, and copies the RE4
+scripts. Needs: REFramework in RE4, the Java 21 JDK, and a CurseForge profile with Minecraft 1.21.1 + Fabric.
+Close Minecraft before running it. The folders it found are remembered in `install-paths.txt`.
+
 ## RE4 side
 Requirements: RE4 Remake on PC (Steam) and [REFramework](https://github.com/praydog/REFramework-nightly/releases)
 (`REFramework.zip` → `dinput8.dll` in the game folder).
@@ -20,7 +26,8 @@ Copy the `.lua` files into `<RE4 game folder>\reframework\autorun\`. Settings: p
 - `minecraft_bridge_hud.lua`: Minecraft HUD (hotbar, hearts, hunger, XP, held item) from live Minecraft data.
   In RE4, **1-9** pick the Minecraft hotbar slot and **left-click** swings the held item (in RE4 and Minecraft).
   Without Minecraft running, it shows Leon's health as hearts.
-  Item icons are the real Minecraft textures, sent by the Minecraft mod. RE4's own UI is hidden while
+  The HUD is drawn from Minecraft's own images (hotbar, hearts, hunger, armor, XP bar) and font, and item
+  icons are the real Minecraft textures, all sent by the Minecraft mod. RE4's own UI is hidden while
   Leon is in the game (**F8** shows it again).
 - `minecraft_first_person.lua`: first-person camera (toggle with **F5**) and Minecraft's `+` crosshair.
 - `minecraft_gameplay.lua`: copies the Minecraft player's movement (walking, sprinting, sneaking, jumping,
@@ -36,7 +43,7 @@ Copy the `.lua` files into `<RE4 game folder>\reframework\autorun\`. Settings: p
 A client-only Fabric mod for Minecraft Java **1.21.1**.
 
 1. Install a Java 21 JDK (e.g. Eclipse Temurin 21).
-2. Build: in `minecraft-bridge-mod`, run `gradlew.bat build` (Windows). The mod is `build\libs\re4bridge-0.4.0.jar`.
+2. Build: in `minecraft-bridge-mod`, run `gradlew.bat build` (Windows). The mod is `build\libs\re4bridge-0.4.1.jar`.
 3. Install Fabric Loader for 1.21.1 (Fabric installer, or a Fabric 1.21.1 profile in the CurseForge/Modrinth app)
    and put the jar in that profile's `mods` folder.
 4. Start Minecraft once. `config\re4bridge.txt` holds the path of the file it writes; change it if RE4 is

@@ -90,6 +90,17 @@ public class Re4Bridge implements ClientModInitializer {
     private static final Map<String, String> blockColors = new HashMap<>();
     private static final Map<String, String> itemTextures = new HashMap<>();
     private static long texturesVersion = 0;
+    private static JsonObject guiImages = null;
+
+    // Minecraft's own HUD images (1.21 sprite names) and its pixel font, so RE4 can draw the exact same UI
+    private static final String[] GUI_IMAGES = {
+            "gui/sprites/hud/hotbar", "gui/sprites/hud/hotbar_selection",
+            "gui/sprites/hud/heart/container", "gui/sprites/hud/heart/full", "gui/sprites/hud/heart/half",
+            "gui/sprites/hud/food_empty", "gui/sprites/hud/food_full", "gui/sprites/hud/food_half",
+            "gui/sprites/hud/armor_empty", "gui/sprites/hud/armor_half", "gui/sprites/hud/armor_full",
+            "gui/sprites/hud/experience_bar_background", "gui/sprites/hud/experience_bar_progress",
+            "gui/sprites/hud/crosshair", "font/ascii",
+    };
 
     /** Movement keys held in RE4. */
     public static class RemoteKeys {
@@ -580,6 +591,16 @@ public class Re4Bridge implements ClientModInitializer {
     private static void updateTextures(Minecraft mc) throws IOException {
         LocalPlayer player = mc.player;
         boolean added = false;
+        if (guiImages == null) {
+            guiImages = new JsonObject();
+            for (String name : GUI_IMAGES) {
+                JsonObject image = readImage(mc, "textures/" + name + ".png");
+                if (image != null) {
+                    guiImages.add(name, image);
+                }
+            }
+            added = true;
+        }
         for (int i = 0; i < 9; i++) {
             ItemStack stack = player.getInventory().getItem(i);
             if (stack.isEmpty()) {
@@ -602,6 +623,7 @@ public class Re4Bridge implements ClientModInitializer {
             JsonObject items = new JsonObject();
             itemTextures.forEach(items::addProperty);
             out.add("items", items);
+            out.add("gui", guiImages);
             write(texturesFile, out.toString());
         }
     }
@@ -640,6 +662,31 @@ public class Re4Bridge implements ClientModInitializer {
                 }
             }
             return pixels;
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    // A whole image at its own size: { w, h, px = "AABBGGRR" hex per pixel, row by row }
+    private static JsonObject readImage(Minecraft mc, String path) {
+        Optional<Resource> resource = mc.getResourceManager().getResource(ResourceLocation.withDefaultNamespace(path));
+        if (resource.isEmpty()) {
+            return null;
+        }
+        try (InputStream in = resource.get().open(); NativeImage image = NativeImage.read(in)) {
+            int w = image.getWidth();
+            int h = image.getHeight();
+            StringBuilder sb = new StringBuilder(w * h * 8);
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) {
+                    sb.append(String.format("%08X", image.getPixelRGBA(x, y)));
+                }
+            }
+            JsonObject out = new JsonObject();
+            out.addProperty("w", w);
+            out.addProperty("h", h);
+            out.addProperty("px", sb.toString());
+            return out;
         } catch (IOException e) {
             return null;
         }

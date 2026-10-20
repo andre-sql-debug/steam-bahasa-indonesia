@@ -372,11 +372,125 @@ local textures = {}           -- item id -> 256 colors (0xAABBGGRR, like draw.* 
 local glint_textures = {}     -- same, tinted purple for enchanted items
 local textures_version = nil
 
+------------------------------------------------------------------------------
+-- Minecraft's own HUD images and font (sent by the Minecraft mod), drawn pixel for pixel
+------------------------------------------------------------------------------
+
+local gui = {}       -- image name -> { w, h, runs = { {x, y, length, color}, ... }, px = hex }
+local glyphs = {}    -- character code -> { advance, runs }
+
+-- Turns "AABBGGRR" hex pixels into runs of same-colored pixels per row (far fewer rectangles to draw)
+local function parse_image(img)
+    if type(img) ~= "table" or type(img.px) ~= "string" or type(img.w) ~= "number" then return nil end
+    local w, h, px = img.w, img.h, img.px
+    if #px ~= w * h * 8 then return nil end
+    local runs = {}
+    for y = 0, h - 1 do
+        local x = 0
+        while x < w do
+            local i = (y * w + x) * 8
+            local hex = px:sub(i + 1, i + 8)
+            local len = 1
+            while x + len < w and px:sub(i + len * 8 + 1, i + len * 8 + 8) == hex do
+                len = len + 1
+            end
+            local c = tonumber(hex, 16) or 0
+            if (c >> 24) > 0 then table.insert(runs, { x, y, len, c }) end
+            x = x + len
+        end
+    end
+    return { w = w, h = h, runs = runs, px = px }
+end
+
+-- clip_w: only draw the first clip_w pixel columns (for the XP bar)
+local function draw_image(name, x, y, px, clip_w)
+    local img = gui[name]
+    if img == nil then return false end
+    for _, r in ipairs(img.runs) do
+        local len = r[3]
+        if clip_w ~= nil then len = math.min(len, clip_w - r[1]) end
+        if len > 0 then
+            draw.filled_rect(x + r[1] * px, y + r[2] * px, len * px, px, r[4])
+        end
+    end
+    return true
+end
+
+-- Minecraft's font: 8x8 glyphs in a 16x16 grid in font/ascii.png
+local function glyph(code)
+    if glyphs[code] ~= nil then return glyphs[code] end
+    local font = gui["font/ascii"]
+    if font == nil or font.w ~= 128 then return nil end
+    local gx, gy = (code % 16) * 8, (code // 16) * 8
+    local runs, right = {}, -1
+    for y = 0, 7 do
+        local x = 0
+        while x < 8 do
+            local i = ((gy + y) * 128 + gx + x) * 8
+            local on = (tonumber(font.px:sub(i + 1, i + 2), 16) or 0) > 0
+            if on then
+                local len = 1
+                while x + len < 8 do
+                    local j = ((gy + y) * 128 + gx + x + len) * 8
+                    if (tonumber(font.px:sub(j + 1, j + 2), 16) or 0) == 0 then break end
+                    len = len + 1
+                end
+                table.insert(runs, { x, y, len })
+                right = math.max(right, x + len - 1)
+                x = x + len
+            else
+                x = x + 1
+            end
+        end
+    end
+    local g = { advance = code == 32 and 4 or right + 2, runs = runs }
+    glyphs[code] = g
+    return g
+end
+
+local function mc_text_width(text)
+    local width = 0
+    for i = 1, #text do
+        local g = glyph(text:byte(i))
+        width = width + (g and g.advance or 6)
+    end
+    return width
+end
+
+local function mc_text_raw(text, x, y, px, color)
+    for i = 1, #text do
+        local g = glyph(text:byte(i))
+        if g ~= nil then
+            for _, r in ipairs(g.runs) do
+                draw.filled_rect(x + r[1] * px, y + r[2] * px, r[3] * px, px, color)
+            end
+            x = x + g.advance * px
+        end
+    end
+end
+
+-- Text with Minecraft's drop shadow (the same color at 1/4 brightness, 1 pixel down-right)
+local function mc_text(text, x, y, px, color)
+    local shadow = (color & 0xFF000000) | (((color & 0x00FCFCFC) >> 2))
+    mc_text_raw(text, x + px, y + px, px, shadow)
+    mc_text_raw(text, x, y, px, color)
+end
+
+local function mc_gui_ready()
+    return gui["gui/sprites/hud/hotbar"] ~= nil and gui["font/ascii"] ~= nil
+end
+
 local function load_textures()
     if data == nil or data.textures_version == nil or data.textures_version == textures_version then return end
     local ok, t = pcall(json.load_file, TEXTURES_FILE)
     if not ok or type(t) ~= "table" or type(t.items) ~= "table" then return end
     textures_version = data.textures_version
+    if type(t.gui) == "table" then
+        for name, img in pairs(t.gui) do
+            if gui[name] == nil then gui[name] = parse_image(img) end
+        end
+        glyphs = {}
+    end
     for id, hex in pairs(t.items) do
         if textures[id] == nil and type(hex) == "string" and #hex == 256 * 8 then
             local pixels = {}
@@ -438,8 +552,80 @@ local function draw_item(item, x, y, px)
 
     if item.count ~= nil and item.count > 1 then
         local text = tostring(item.count)
-        shadow_text(text, x + 17 * px - #text * 7, y + 16 * px - 13, WHITE)
+        if mc_gui_ready() then
+            mc_text(text, x + (19 - 2 - mc_text_width(text)) * px, y + (6 + 3) * px, px, WHITE)
+        else
+            shadow_text(text, x + 17 * px - #text * 7, y + 16 * px - 13, WHITE)
+        end
     end
+end
+
+------------------------------------------------------------------------------
+-- The HUD drawn with Minecraft's own images, laid out like Minecraft's Gui class
+------------------------------------------------------------------------------
+
+local XP_TEXT = 0xFF20FF80   -- Minecraft's 0x80FF20
+
+local function mc_status_row(x0, y, px, value, empty, half, full, from_right)
+    for i = 0, 9 do
+        local x = from_right and (x0 - i * 8 * px - 9 * px) or (x0 + i * 8 * px)
+        draw_image(empty, x, y, px)
+        if i * 2 + 1 < value then
+            draw_image(full, x, y, px)
+        elseif i * 2 + 1 == value then
+            draw_image(half, x, y, px)
+        end
+    end
+end
+
+local function draw_mc_hud(w, h, px, x0, selected, survival)
+    local hotbar_y = h - 22 * px
+    draw_image("gui/sprites/hud/hotbar", x0, hotbar_y, px)
+    if selected ~= nil then
+        draw_image("gui/sprites/hud/hotbar_selection", x0 - px + selected * 20 * px, hotbar_y - px, px)
+    end
+    for i = 0, 8 do
+        draw_item(data.hotbar and data.hotbar["s" .. i], x0 + (3 + i * 20) * px, h - 19 * px, px)
+    end
+    if not survival then return end
+
+    -- XP bar and level
+    draw_image("gui/sprites/hud/experience_bar_background", x0, h - 29 * px, px)
+    local fill = math.floor((data.xp_progress or 0) * 183)
+    if fill > 0 then
+        draw_image("gui/sprites/hud/experience_bar_progress", x0, h - 29 * px, px, fill)
+    end
+    local level = data.xp_level or 0
+    if level > 0 then
+        local text = tostring(level)
+        local tx = x0 + 91 * px - math.floor(mc_text_width(text) / 2) * px
+        local ty = h - 35 * px
+        for _, o in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
+            mc_text_raw(text, tx + o[1] * px, ty + o[2] * px, px, 0xFF000000)
+        end
+        mc_text_raw(text, tx, ty, px, XP_TEXT)
+    end
+
+    -- Hearts (shaking when low), armor above them, hunger on the right
+    local health = math.ceil(data.health or 0)
+    local hearts_y = h - 39 * px
+    for i = 0, 9 do
+        local y = hearts_y
+        if health <= 4 then y = y + math.random(0, 1) * px end
+        local x = x0 + i * 8 * px
+        draw_image("gui/sprites/hud/heart/container", x, y, px)
+        if i * 2 + 1 < health then
+            draw_image("gui/sprites/hud/heart/full", x, y, px)
+        elseif i * 2 + 1 == health then
+            draw_image("gui/sprites/hud/heart/half", x, y, px)
+        end
+    end
+    if (data.armor or 0) > 0 then
+        mc_status_row(x0, hearts_y - 10 * px, px, data.armor,
+            "gui/sprites/hud/armor_empty", "gui/sprites/hud/armor_half", "gui/sprites/hud/armor_full", false)
+    end
+    mc_status_row(x0 + 182 * px, hearts_y, px, data.food or 0,
+        "gui/sprites/hud/food_empty", "gui/sprites/hud/food_half", "gui/sprites/hud/food_full", true)
 end
 
 local function draw_hotbar(x0, y, px, hotbar, selected)
@@ -787,10 +973,18 @@ re.on_frame(function()
     if settings.held_item and data.hotbar ~= nil then
         draw_held_item(w, h, px, data.hotbar["s" .. tostring(selected)])
     end
-    draw_hotbar(x0, h - 22 * px, px, data.hotbar, selected)
 
     local creative = data.game_mode == "creative" or data.game_mode == "spectator"
-    if creative and not settings.survival_bars_in_creative then return end
+    local survival = not creative or settings.survival_bars_in_creative
+
+    -- Minecraft's own images when the mod has sent them; otherwise the built-in drawings
+    if mc_gui_ready() then
+        draw_mc_hud(w, h, px, x0, selected, survival)
+        return
+    end
+
+    draw_hotbar(x0, h - 22 * px, px, data.hotbar, selected)
+    if not survival then return end
 
     draw_xp(x0, h - 29 * px, px, data.xp_level, data.xp_progress)
     draw_hearts(x0, h - 39 * px, px, data.health or 0)
