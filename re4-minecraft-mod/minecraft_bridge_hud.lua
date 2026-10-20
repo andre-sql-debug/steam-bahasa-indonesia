@@ -1,6 +1,8 @@
 -- Minecraft Bridge HUD for RE4 Remake (REFramework Lua script)
--- Draws Minecraft's HUD (hotbar, hearts, hunger, XP) using live data from Minecraft.
--- Needs the RE4 Bridge Minecraft mod, which writes reframework\data\minecraft_bridge.json.
+-- Draws Minecraft's HUD (hotbar, hearts, hunger, XP, held item) using live data from Minecraft,
+-- and sends RE4 input back to Minecraft: 1-9 select a hotbar slot, left-click swings the item.
+-- Needs the RE4 Bridge Minecraft mod, which writes reframework\data\minecraft_bridge.json
+-- and reads reframework\data\minecraft_bridge_input.json.
 -- When Minecraft isn't connected, the hearts show Leon's health instead.
 -- Install: copy this file to <RE4 folder>\reframework\autorun\
 -- Settings: press Insert -> Script Generated UI -> Minecraft HUD
@@ -9,6 +11,8 @@ local settings = {
     enabled = true,
     scale = 0,                  -- 0 = auto (based on screen height)
     survival_bars_in_creative = false,
+    held_item = true,
+    send_input = true,
     show_debug = false,
 }
 
@@ -309,11 +313,21 @@ local function draw_xp(x0, y, px, level, progress)
     end
 end
 
-local function draw_item(item, x, y, px)
-    if item == nil or item.id == nil then return end
+local BLOCK_SPRITE = {
+    "........",
+    ".KKKKKK.",
+    ".KTTTTK.",
+    ".KBBBBK.",
+    ".KBBBBK.",
+    ".KBBBBK.",
+    ".KKKKKK.",
+    "........",
+}
+
+-- Returns the 8x8 sprite and palette for an item, plus a letter for items we have no art for
+local function item_look(item)
     local name = item.id:gsub("^minecraft:", "")
     local enchanted = item.enchanted == true
-    local ipx = px * 2   -- 8x8 sprites drawn at 16x16 GUI units
 
     local kind = nil
     if name:find("_sword$") then kind = "sword"
@@ -326,28 +340,34 @@ local function draw_item(item, x, y, px)
 
     if kind ~= nil then
         local material = find_color(name, MATERIALS, { 200, 200, 200 })
-        draw_sprite(ITEM_SPRITES[kind], x, y, ipx, {
+        local string_color = (kind == "crossbow" and item.charged) and { 180, 180, 180 } or { 230, 230, 230 }
+        return ITEM_SPRITES[kind], {
             M = to_color(material, enchanted),
             H = to_color({ 120, 80, 40 }, enchanted),
-            S = to_color({ 230, 230, 230 }, enchanted),
+            S = to_color(string_color, enchanted),
             K = BLACK,
-        })
-        if kind == "crossbow" and item.charged then
-            draw.filled_rect(x + 3 * ipx, y + 2 * ipx, ipx, ipx, rgb(180, 180, 180))
-        end
-    else
-        -- Blocks and everything else: a little shaded cube
-        local base = find_color(name, BLOCK_COLORS, nil)
-        local known = base ~= nil
-        base = base or hash_color(name)
-        local s = 12 * px
-        local bx, by = x + 2 * px, y + 2 * px
-        draw.filled_rect(bx, by, s, s, to_color(shade(base, 0.8), enchanted))
-        draw.filled_rect(bx, by, s, 4 * px, to_color(shade(base, 1.15), enchanted))
-        outline(bx, by, s, s, px, BLACK)
-        if not known then
-            shadow_text(name:sub(1, 1):upper(), bx + 4 * px, by + 3 * px, WHITE)
-        end
+        }, nil
+    end
+
+    -- Blocks and everything else: a little shaded cube
+    local base = find_color(name, BLOCK_COLORS, nil)
+    local letter = base == nil and name:sub(1, 1):upper() or nil
+    base = base or hash_color(name)
+    return BLOCK_SPRITE, {
+        T = to_color(shade(base, 1.15), enchanted),
+        B = to_color(shade(base, 0.8), enchanted),
+        K = BLACK,
+    }, letter
+end
+
+local function draw_item(item, x, y, px)
+    if item == nil or item.id == nil then return end
+    local ipx = px * 2   -- 8x8 sprites drawn at 16x16 GUI units
+
+    local sprite, palette, letter = item_look(item)
+    draw_sprite(sprite, x, y, ipx, palette)
+    if letter ~= nil then
+        shadow_text(letter, x + 6 * px, y + 5 * px, WHITE)
     end
 
     if item.max_damage ~= nil and item.damage ~= nil and item.damage > 0 then
@@ -377,6 +397,115 @@ local function draw_hotbar(x0, y, px, hotbar, selected)
     end
 end
 
+------------------------------------------------------------------------------
+-- Held item (bottom right, like Minecraft's first-person hand)
+------------------------------------------------------------------------------
+
+local SWING_FRAMES = 18   -- Minecraft's swing takes 6 ticks (~0.3 s)
+local swing_frame = nil
+
+-- Draws the sprite rotated around its bottom-left corner (where the handle is)
+local function draw_sprite_rotated(sprite, pivot_x, pivot_y, size, angle, palette)
+    local c, s = math.cos(angle), math.sin(angle)
+    local rows = #sprite
+    for row = 1, rows do
+        local line = sprite[row]
+        for col = 1, #line do
+            local color = palette[line:sub(col, col)]
+            if color ~= nil then
+                local lx = (col - 0.5) * size
+                local ly = (row - 0.5 - rows) * size
+                local rx, ry = lx * c - ly * s, lx * s + ly * c
+                draw.filled_rect(pivot_x + rx - size / 2, pivot_y + ry - size / 2, size + 1, size + 1, color)
+            end
+        end
+    end
+end
+
+local function draw_held_item(w, h, px, item)
+    if item == nil or item.id == nil then return end
+    local sprite, palette = item_look(item)
+
+    -- Swing: the item dips toward the crosshair and back, like in Minecraft
+    local t = 0
+    if swing_frame ~= nil then
+        t = (frame - swing_frame) / SWING_FRAMES
+        if t >= 1 then
+            swing_frame = nil
+            t = 0
+        end
+    end
+    local swing = math.sin(t * math.pi)
+    local size = 9 * px
+    local pivot_x = w * 0.70 - swing * size * 6
+    local pivot_y = h * 0.97 - swing * size * 2
+    draw_sprite_rotated(sprite, pivot_x, pivot_y, size, -swing * 0.9, palette)
+end
+
+------------------------------------------------------------------------------
+-- RE4 -> Minecraft input
+------------------------------------------------------------------------------
+
+local INPUT_FILE = "minecraft_bridge_input.json"   -- relative to reframework\data
+local input = { seq = 0, swings = 0 }
+local number_keys_down = {}
+local mouse_was_down = false
+local input_info = "nothing sent yet"
+local mouse_source = "none"
+local select_frame = -1000
+
+local function send_input()
+    input.seq = input.seq + 1
+    local ok, written = pcall(json.dump_file, INPUT_FILE, input)
+    input_info = (ok and written ~= false) and ("sent #" .. input.seq) or "could not write input file"
+end
+
+local function key_down(key)
+    local ok, down = pcall(function() return reframework:is_key_down(key) end)
+    return ok and down == true
+end
+
+-- Not every REFramework build reports mouse buttons the same way, so try both
+local function mouse_down()
+    if key_down(0x01) then
+        mouse_source = "is_key_down"
+        return true
+    end
+    local ok, down = pcall(imgui.is_mouse_down, 0)
+    if ok and down == true then
+        mouse_source = "imgui"
+        return true
+    end
+    return false
+end
+
+local function menu_open()
+    local ok, open = pcall(function() return reframework:is_drawing_ui() end)
+    return ok and open == true
+end
+
+local function update_input()
+    if menu_open() then return end
+
+    for i = 1, 9 do
+        local down = key_down(0x30 + i)
+        if down and not number_keys_down[i] then
+            input.selected = i - 1
+            select_frame = frame
+            send_input()
+        end
+        number_keys_down[i] = down
+    end
+
+    local mouse = mouse_down()
+    if mouse and not mouse_was_down then
+        input.swings = input.swings + 1
+        swing_frame = frame
+        send_input()
+    end
+    mouse_was_down = mouse
+end
+
 local function get_screen_size()
     local ok, size = pcall(imgui.get_display_size)
     if ok and size ~= nil and size.x > 0 then
@@ -402,6 +531,7 @@ re.on_frame(function()
     local x0 = math.floor(w / 2 - 91 * px)
 
     if not is_connected() then
+        swing_frame = nil
         local health = leon_health()
         if health ~= nil then
             draw_hearts(x0, h - 39 * px, px, health)
@@ -409,7 +539,20 @@ re.on_frame(function()
         return
     end
 
-    draw_hotbar(x0, h - 22 * px, px, data.hotbar, data.selected)
+    if settings.send_input then
+        update_input()
+    end
+
+    -- Show the slot picked in RE4 right away, before Minecraft confirms it
+    local selected = data.selected
+    if input.selected ~= nil and frame - select_frame < 10 then
+        selected = input.selected
+    end
+
+    if settings.held_item and data.hotbar ~= nil then
+        draw_held_item(w, h, px, data.hotbar["s" .. tostring(selected)])
+    end
+    draw_hotbar(x0, h - 22 * px, px, data.hotbar, selected)
 
     local creative = data.game_mode == "creative" or data.game_mode == "spectator"
     if creative and not settings.survival_bars_in_creative then return end
@@ -425,6 +568,8 @@ re.on_draw_ui(function()
         changed, settings.enabled = imgui.checkbox("Enabled", settings.enabled)
         changed, settings.scale = imgui.slider_int("Size (0 = auto)", settings.scale, 0, 8)
         changed, settings.survival_bars_in_creative = imgui.checkbox("Show hearts/hunger/XP in Creative", settings.survival_bars_in_creative)
+        changed, settings.held_item = imgui.checkbox("Show held item", settings.held_item)
+        changed, settings.send_input = imgui.checkbox("Send 1-9 and left-click to Minecraft", settings.send_input)
         imgui.text(is_connected() and "Minecraft: connected" or "Minecraft: not connected (showing Leon's health)")
         changed, settings.show_debug = imgui.checkbox("Show debug info", settings.show_debug)
         if settings.show_debug then
@@ -435,6 +580,7 @@ re.on_draw_ui(function()
                     tostring(data.game_mode), tostring(data.health), tostring(data.food),
                     tostring(data.xp_level), tostring(data.selected)))
             end
+            imgui.text("Input to Minecraft: " .. input_info .. " (mouse via " .. mouse_source .. ")")
             imgui.text("Leon: " .. leon_hp_info)
         end
         imgui.tree_pop()
