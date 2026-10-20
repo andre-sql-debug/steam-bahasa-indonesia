@@ -73,13 +73,14 @@ local state = {
     jumping = false,
     flying = false,
     fly_pos = nil,
-    airborne = false,       -- Minecraft player is jumping or flying
-    base_y = 0,
-    smooth_y = nil,
+    vy = nil,               -- vertical speed we control (jumping/flying), nil = RE4 controls height
+    auth_pos = nil,         -- where Leon should be (after RE4's collision check) while we move him
+    controlling = false,    -- did we move Leon this frame?
     last_space_time = -10,
     last_attack_time = -10,
     last_attack_seq = nil,
     predicted_jump_time = nil,
+    probe = nil,            -- movement recorder
     time = 0,
     frame_start_pos = nil,
 }
@@ -214,7 +215,7 @@ local function is_on_ground(player)
         return ground
     end
     debug.ground = "unknown"
-    return not state.jumping
+    return state.vy == nil
 end
 
 -- Horizontal camera directions (so W walks where you look), the full look direction and the camera
@@ -234,23 +235,45 @@ local function camera_vectors()
     return forward, right, f, cam_transform
 end
 
-local function set_gravity(player, on)
+-- gravity: RE4 pulls Leon down; check_ground: RE4 snaps Leon onto the ground
+local function set_gravity(player, gravity, check_ground)
     if player.adsorber == nil then return end
-    try_call(player.adsorber, "set_EnabledGravity", on)
-    try_call(player.adsorber, "set_EnabledCheckGround", on)
+    if check_ground == nil then check_ground = gravity end
+    try_call(player.adsorber, "set_EnabledGravity", gravity)
+    try_call(player.adsorber, "set_EnabledCheckGround", check_ground)
 end
 
--- Puts Leon at (start of this frame + delta) right before RE4's collision check,
--- so RE4's walls and floors still block him. y = nil keeps RE4's own height (ground, stairs).
-local function move_leon(player, delta_x, delta_z, y)
-    local start = state.frame_start_pos
+-- Moves Leon by (dx, dy, dz) from where he should be, right before RE4's collision check, so RE4's
+-- walls, floors and ceilings still stop him. dy = nil keeps RE4's own height (ground, stairs).
+-- RE4 also moves Leon later in the frame; the LateUpdateBehavior hook below undoes that.
+local function move_leon(player, dx, dz, dy)
     local current = player.transform and try_call(player.transform, "get_Position")
-    if start == nil or current == nil then
+    local base = state.auth_pos or state.frame_start_pos
+    if base == nil or current == nil then
         debug.movement = "position not found"
         return false
     end
-    try_call(player.transform, "set_Position", Vector3f.new(start.x + delta_x, y or current.y, start.z + delta_z))
+    local y = dy ~= nil and (base.y + dy) or current.y
+    local desired = Vector3f.new(base.x + dx, y, base.z + dz)
+    try_call(player.transform, "set_Position", desired)
+    state.controlling = true
+    if state.probe ~= nil then
+        state.probe.sample.before_us = current
+        state.probe.sample.desired = desired
+    end
     return true
+end
+
+-- Vertical speed: nil hands height back to RE4 (gravity and ground snapping on)
+local function set_vertical(player, vy)
+    if vy == nil then
+        if state.vy ~= nil then set_gravity(player, true) end
+    elseif vy > 0 then
+        set_gravity(player, false, false)   -- going up: nothing pulls Leon down
+    else
+        set_gravity(player, false, true)    -- coming down: let RE4 catch him on the ground
+    end
+    state.vy = vy
 end
 
 ------------------------------------------------------------------------------
@@ -308,56 +331,37 @@ local function update_from_minecraft(player, dt)
         state.velocity = velocity
     end
 
-    -- A jump press starts a predicted jump right away; Minecraft's real jump takes over when it arrives
-    local mc_height = move.height or 0
-    if keys.jump and not state.airborne and state.predicted_jump_time == nil and move.on_ground ~= false then
+    -- Vertical: Minecraft's own vertical speed while its player is in the air. A jump press starts
+    -- a predicted jump right away; Minecraft's real jump takes over as soon as it arrives.
+    local mc_airborne = move.flying == true or move.on_ground == false
+    if keys.jump and state.vy == nil and state.predicted_jump_time == nil and not mc_airborne then
         state.predicted_jump_time = state.time
     end
-    if state.predicted_jump_time ~= nil and (mc_height > 0.01 or state.time - state.predicted_jump_time > JUMP_PREDICT_SECONDS) then
+    if state.predicted_jump_time ~= nil and (mc_airborne or state.time - state.predicted_jump_time > JUMP_PREDICT_SECONDS) then
         state.predicted_jump_time = nil
     end
-    local predicted_height = nil
+
+    local vy = nil
     if state.predicted_jump_time ~= nil then
         local t = state.time - state.predicted_jump_time
-        predicted_height = math.max(0, MC.jump_velocity * t - 0.5 * MC.gravity * t * t)
+        vy = MC.jump_velocity - MC.gravity * t
+    elseif mc_airborne then
+        vy = (move.up or 0) * TICKS_PER_SECOND
+        -- Falling and RE4 says Leon already stands on something: he has landed
+        if vy <= 0 and not move.flying and is_on_ground(player) then vy = nil end
     end
-
-    -- Jumping and flying: Leon's height follows the Minecraft player's height above its ground
-    local airborne = move.flying == true or mc_height > 0.01 or predicted_height ~= nil
-    local start = state.frame_start_pos
-    if airborne and not state.airborne and start ~= nil then
-        state.airborne = true
-        state.base_y = start.y
-        state.smooth_y = start.y
-        set_gravity(player, false)
-    elseif not airborne and state.airborne then
-        state.airborne = false
-        state.smooth_y = nil
-        set_gravity(player, true)
-    end
+    set_vertical(player, vy)
 
     local moving = length_xz(velocity) > 0.01
-    if not moving and not state.airborne then
+    if not moving and vy == nil then
         debug.movement = "idle (game controls Leon)"
         return
     end
 
-    local y = nil
-    if state.airborne then
-        -- Minecraft updates 20 times per second; ease toward its height so the jump looks smooth
-        if predicted_height ~= nil then
-            state.smooth_y = state.base_y + predicted_height
-        else
-            local target = state.base_y + mc_height
-            state.smooth_y = state.smooth_y + (target - state.smooth_y) * math.min(1, 20 * dt)
-        end
-        y = state.smooth_y
-    end
-
-    if move_leon(player, velocity.x * dt, velocity.z * dt, y) then
+    if move_leon(player, velocity.x * dt, velocity.z * dt, vy and vy * dt) then
         debug.movement = string.format("%s: %.2f m/s%s%s%s", predicting and "predicting" or "Minecraft", length_xz(velocity),
             move.sprinting and " sprinting" or "", move.flying and " flying" or "",
-            state.airborne and string.format(" height %.2f", move.height or 0) or "")
+            vy and string.format(" vertical %.1f m/s", vy) or "")
     end
 end
 
@@ -393,31 +397,23 @@ local function update_builtin_walking(player, dt)
     state.velocity = state.velocity + (dir * speed - state.velocity) * math.min(1, MC.accel * dt)
 
     local on_ground = is_on_ground(player)
-    if key_down(KEY.SPACE) and on_ground and not state.jumping then
-        state.jumping = true
-        state.vertical = MC.jump_velocity
-        set_gravity(player, false)
-    elseif state.jumping then
-        state.vertical = state.vertical - MC.gravity * dt
-        if state.vertical < 0 and on_ground then
-            state.jumping = false
-            state.vertical = 0
-            set_gravity(player, true)
-        end
+    local vy = state.vy
+    if key_down(KEY.SPACE) and on_ground and vy == nil then
+        vy = MC.jump_velocity
+    elseif vy ~= nil then
+        vy = vy - MC.gravity * dt
+        if vy < 0 and on_ground then vy = nil end
     end
+    set_vertical(player, vy)
 
-    if not moving and length_xz(state.velocity) < 0.05 and not state.jumping then
+    if not moving and length_xz(state.velocity) < 0.05 and vy == nil then
         state.velocity = Vector3f.new(0, 0, 0)
         debug.movement = "idle (game controls Leon)"
         return
     end
 
-    local y = nil
-    if state.jumping and state.frame_start_pos ~= nil then
-        y = state.frame_start_pos.y + state.vertical * dt
-    end
-    if move_leon(player, state.velocity.x * dt, state.velocity.z * dt, y) then
-        debug.movement = string.format("built-in: %.2f m/s%s", length_xz(state.velocity), state.jumping and " (jumping)" or "")
+    if move_leon(player, state.velocity.x * dt, state.velocity.z * dt, vy and vy * dt) then
+        debug.movement = string.format("built-in: %.2f m/s%s", length_xz(state.velocity), vy and " (jumping)" or "")
     end
 end
 
@@ -428,8 +424,8 @@ local function set_flying(player, on)
         if state.fly_pos == nil then return end
     end
     state.flying = on
-    state.jumping = false
-    state.vertical = 0
+    state.vy = nil
+    state.auth_pos = nil
     if player.controller ~= nil then try_call(player.controller, "set_Enabled", not on) end
     set_gravity(player, not on)
 end
@@ -556,9 +552,84 @@ end
 ------------------------------------------------------------------------------
 
 -- Where Leon is before RE4 moves him this frame
+------------------------------------------------------------------------------
+-- Movement recorder: saves ~2 seconds of Leon's position at each step of the frame,
+-- to reframework\data\minecraft_movement_probe.json
+------------------------------------------------------------------------------
+
+local PROBE_FILE = "minecraft_movement_probe.json"
+local PROBE_FRAMES = 120
+local probe_status = "not recorded yet"
+
+local function vec(v)
+    if v == nil then return nil end
+    return { x = math.floor(v.x * 1000) / 1000, y = math.floor(v.y * 1000) / 1000, z = math.floor(v.z * 1000) / 1000 }
+end
+
+local function probe_set(name, value)
+    if state.probe ~= nil then state.probe.sample[name] = value end
+end
+
+local function start_probe()
+    state.probe = { samples = {}, sample = {} }
+    probe_status = "recording... keep walking"
+end
+
+local function finish_probe_frame()
+    if state.probe == nil then return end
+    local sample = state.probe.sample
+    for k, v in pairs(sample) do
+        if type(v) == "userdata" then sample[k] = vec(v) end
+    end
+    sample.mode = debug.mode
+    sample.movement = debug.movement
+    sample.ground = debug.ground
+    if bridge ~= nil then sample.mc_move = bridge.move; sample.mc_keys = bridge.keys end
+    table.insert(state.probe.samples, sample)
+    state.probe.sample = {}
+    if #state.probe.samples >= PROBE_FRAMES then
+        local ok, written = pcall(json.dump_file, PROBE_FILE, state.probe.samples)
+        probe_status = (ok and written ~= false) and ("saved to reframework\\data\\" .. PROBE_FILE) or "could not save"
+        state.probe = nil
+    end
+end
+
+------------------------------------------------------------------------------
+-- Main update
+------------------------------------------------------------------------------
+
+-- Where Leon is before RE4 moves him this frame
 re.on_pre_application_entry("UpdateBehavior", function()
     local player = get_player()
     state.frame_start_pos = player and player.transform and try_call(player.transform, "get_Position")
+    state.controlling = false
+    probe_set("start", state.frame_start_pos)
+end)
+
+-- Right after RE4's collision check: this is where Leon should stay for the rest of the frame
+re.on_application_entry("UpdatePhysicsCharacterController", function()
+    if not state.controlling then
+        state.auth_pos = nil
+        return
+    end
+    local player = get_player()
+    state.auth_pos = player and player.transform and try_call(player.transform, "get_Position")
+    probe_set("after_collision", state.auth_pos)
+end)
+
+-- RE4 moves Leon again late in the frame (its own walking); put him back where we had him
+re.on_application_entry("LateUpdateBehavior", function()
+    local player = get_player()
+    local current = player and player.transform and try_call(player.transform, "get_Position")
+    probe_set("late_by_re4", current)
+    if state.controlling and state.auth_pos ~= nil and current ~= nil then
+        local y = state.vy ~= nil and state.auth_pos.y or current.y
+        local fixed = Vector3f.new(state.auth_pos.x, y, state.auth_pos.z)
+        try_call(player.transform, "set_Position", fixed)
+        state.auth_pos = fixed
+        probe_set("final", fixed)
+    end
+    finish_probe_frame()
 end)
 
 -- Right before RE4's collision check
@@ -578,6 +649,7 @@ re.on_pre_application_entry("UpdatePhysicsCharacterController", function()
         if settings.movement then
             update_from_minecraft(player, dt)
         else
+            set_vertical(player, nil)
             debug.movement = "off (F7)"
         end
         if settings.combat then update_minecraft_combat() end
@@ -585,10 +657,6 @@ re.on_pre_application_entry("UpdatePhysicsCharacterController", function()
     end
 
     debug.mode = "built-in (Minecraft not connected)"
-    if state.airborne then
-        state.airborne = false
-        set_gravity(player, true)
-    end
     if menu_open() then return end
 
     local toggle_fly = pressed(KEY.F6)
@@ -624,6 +692,9 @@ re.on_draw_ui(function()
         imgui.text("Mode: " .. debug.mode)
         changed, settings.show_debug = imgui.checkbox("Show debug info", settings.show_debug)
         if settings.show_debug then
+            if imgui.button("Record movement (2 s)") then start_probe() end
+            imgui.same_line()
+            imgui.text(probe_status)
             imgui.text("Player: " .. debug.player)
             imgui.text("Movement: " .. debug.movement)
             imgui.text("Ground: " .. debug.ground)
