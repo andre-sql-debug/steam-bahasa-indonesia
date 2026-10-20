@@ -13,3 +13,4 @@ Settings: press **Insert** → **Script Generated UI**.
 ## Scripts
 - `minecraft_hearts.lua`: Leon's health shown as 10 Minecraft hearts, with half hearts and the low-health shake.
 - `minecraft_first_person.lua`: first-person camera (toggle with **F5**) and Minecraft's `+` crosshair.
+- `minecraft_creative.lua`: Creative mode: flying (double-tap **Space** or **F6**; WASD, Space up, Ctrl down, Shift faster) and no damage.
