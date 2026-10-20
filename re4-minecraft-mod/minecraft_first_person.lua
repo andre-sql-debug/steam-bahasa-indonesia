@@ -8,7 +8,7 @@ local settings = {
     first_person = true,
     forward_offset = 0.10,  -- meters in front of the head joint
     up_offset = 0.05,
-    hide_head = true,
+    hide_head = false,      -- experimental, see set_head_hidden
     crosshair = true,
     stage = 1,              -- index into STAGES
     show_debug = false,
@@ -127,16 +127,12 @@ local function is_head_part(name)
     return false
 end
 
--- Two ways to hide the head: shrink the head joint, and switch off head/hair/face meshes
+-- Hides the head by switching off head/hair/face meshes.
+-- (Shrinking the head joint to ~0 was removed: it can hang the GPU.)
 local function set_head_hidden(hidden, transform)
-    if head_joint == nil then return end
-    if not hidden and not head_hidden then return end
+    if head_joint == nil or hidden == head_hidden then return end
 
-    -- The animation may reset the scale every frame, so re-apply it while hidden
-    local s = hidden and 0.001 or 1.0
-    try_call(head_joint, "set_LocalScale", Vector3f.new(s, s, s))
-
-    if hidden and not head_hidden and transform ~= nil then
+    if hidden and transform ~= nil then
         for_each_child(transform, function(go, name)
             if go ~= nil and is_head_part(name) then
                 local mesh = try_call(go, "getComponent(System.Type)", mesh_type)
@@ -202,13 +198,16 @@ local function update_toggle_key()
 end
 
 local function update_camera(stage)
-    local selected = STAGES[settings.stage]
-    if selected ~= "All" and selected ~= stage then return end
-
     local joint, transform = get_head_joint()
     if joint == nil then return end
 
-    set_head_hidden(settings.first_person and settings.hide_head, transform)
+    -- Only change meshes during the game update, never while a frame is being prepared for drawing
+    if stage == "LateUpdateBehavior" then
+        set_head_hidden(settings.first_person and settings.hide_head, transform)
+    end
+
+    local selected = STAGES[settings.stage]
+    if selected ~= "All" and selected ~= stage then return end
     if not settings.first_person then return end
 
     local camera = sdk.get_primary_camera()
