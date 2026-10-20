@@ -19,7 +19,11 @@ Copy the `.lua` files into `<RE4 game folder>\reframework\autorun\`. Settings: p
   In RE4, **1-9** pick the Minecraft hotbar slot and **left-click** swings the held item (in RE4 and Minecraft).
   Without Minecraft running, it shows Leon's health as hearts.
 - `minecraft_first_person.lua`: first-person camera (toggle with **F5**) and Minecraft's `+` crosshair.
-- `minecraft_creative.lua`: Creative mode: flying (double-tap **Space** or **F6**; WASD, Space up, Shift or C down, Ctrl faster) and no damage.
+- `minecraft_gameplay.lua`: Minecraft movement (walk 4.3 m/s, Ctrl sprint, Shift sneak, Space jump 1.25 m),
+  flying (double-tap **Space** in Creative or **F6**), no damage, and melee combat: left-click hits the enemy in
+  front of you with your Minecraft item's damage and attack cooldown. **F7** turns Minecraft movement off
+  (for ladders and doors).
+- `minecraft_scanner.lua`: debugging tool; saves RE4 internals to `reframework\data\minecraft_scan.json`.
 
 ## Minecraft side (`minecraft-bridge-mod/`)
 A client-only Fabric mod for Minecraft Java **1.21.1**.
