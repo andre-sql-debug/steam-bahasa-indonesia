@@ -273,7 +273,7 @@ re.on_frame(function()
     last_leon = Vector3f.new(leon.x, leon.y, leon.z)
     if anchor_re4 == nil or reanchor then set_anchor(leon) end
 
-    if frame % SYNC_EVERY_FRAMES == 0 then write_sync(leon) end
+    if frame % SYNC_EVERY_FRAMES == 0 and not reanchor then write_sync(leon) end
     load_blocks()
 
     local cam = camera_position()

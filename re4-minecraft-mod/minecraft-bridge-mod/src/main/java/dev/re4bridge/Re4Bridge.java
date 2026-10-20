@@ -58,6 +58,8 @@ public class Re4Bridge implements ClientModInitializer {
     private static final int BLOCK_SCAN_EVERY_TICKS = 5;
     // Leon and the Minecraft player may drift apart this far (RE4 walls) before Minecraft's player is moved back
     private static final double SYNC_DISTANCE = 1.0;
+    // Farther than this is not drift but RE4 loading another area; never teleport that far (it can freeze Minecraft)
+    private static final double SYNC_MAX_DISTANCE = 8.0;
 
     private static Path outputFile;
     private static Path inputFile;
@@ -191,6 +193,10 @@ public class Re4Bridge implements ClientModInitializer {
         }
     }
 
+    private static Float finiteOrNull(float value) {
+        return Float.isFinite(value) ? value : null;
+    }
+
     private static boolean flag(JsonObject obj, String name) {
         return obj.has(name) && obj.get(name).getAsBoolean();
     }
@@ -237,8 +243,11 @@ public class Re4Bridge implements ClientModInitializer {
                 next.attack = flag(k, "attack");
                 keys = next;
             }
-            remoteYaw = input.has("yaw") ? input.get("yaw").getAsFloat() : null;
-            remotePitch = input.has("pitch") ? input.get("pitch").getAsFloat() : null;
+            remoteYaw = input.has("yaw") ? finiteOrNull(input.get("yaw").getAsFloat()) : null;
+            remotePitch = input.has("pitch") ? finiteOrNull(input.get("pitch").getAsFloat()) : null;
+            if (remotePitch != null) {
+                remotePitch = Math.max(-90.0F, Math.min(90.0F, remotePitch));
+            }
 
             // Only react when RE4 picks a new slot, so changing slots in Minecraft itself still works
             if (input.has("selected")) {
@@ -301,9 +310,13 @@ public class Re4Bridge implements ClientModInitializer {
         lastSyncSeq = syncSeq;
         double x = sync.get("x").getAsDouble();
         double z = sync.get("z").getAsDouble();
+        if (!Double.isFinite(x) || !Double.isFinite(z)) {
+            return;
+        }
         double dx = player.getX() - x;
         double dz = player.getZ() - z;
-        if (dx * dx + dz * dz > SYNC_DISTANCE * SYNC_DISTANCE) {
+        double distance2 = dx * dx + dz * dz;
+        if (distance2 > SYNC_DISTANCE * SYNC_DISTANCE && distance2 <= SYNC_MAX_DISTANCE * SYNC_MAX_DISTANCE) {
             player.setPos(x, player.getY(), z);
         }
     }
