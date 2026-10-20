@@ -9,6 +9,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.item.CrossbowItem;
 import net.minecraft.world.item.ItemStack;
 import org.slf4j.Logger;
@@ -23,9 +24,11 @@ import java.nio.file.StandardCopyOption;
 import java.util.List;
 
 /**
- * Writes the player's HUD state to a JSON file inside RE4's reframework\data folder,
- * where the minecraft_bridge_hud.lua REFramework script reads it, and applies the input
- * that script writes back (hotbar slot, swings).
+ * Bridge between Minecraft and the RE4 REFramework scripts, through two JSON files in RE4's
+ * reframework\data folder:
+ * - minecraft_bridge.json (written here): HUD state, the player's movement this tick, and attacks.
+ * - minecraft_bridge_input.json (written by RE4): keys held in RE4, hotbar slot, swings.
+ * Minecraft's own code does the movement and attack math; RE4 only applies the results to Leon.
  */
 public class Re4Bridge implements ClientModInitializer {
     public static final Logger LOGGER = LoggerFactory.getLogger("re4bridge");
@@ -33,20 +36,44 @@ public class Re4Bridge implements ClientModInitializer {
     private static final String DEFAULT_OUTPUT =
             "D:\\SteamLibrary\\steamapps\\common\\RESIDENT EVIL 4  BIOHAZARD RE4\\reframework\\data\\minecraft_bridge.json";
 
+    // RE4 sends a heartbeat several times per second; without one for this long, the keyboard takes over again
+    private static final long REMOTE_TIMEOUT_MS = 1500;
+
     private static Path outputFile;
     private static Path inputFile;
     private static long seq = 0;
     private static boolean warnedWrite = false;
 
     private static long lastInputSeq = -1;
+    private static long lastInputTime = 0;
     private static int lastInputSelected = -1;
     private static int lastInputSwings = -1;
+    private static RemoteKeys keys = null;
+
+    private static double groundY = Double.NaN;
+    private static long attackSeq = 0;
+    private static float lastAttackDamage = 0;
+    private static float lastAttackStrength = 0;
+    private static boolean lastAttackCrit = false;
+
+    /** Movement keys held in RE4. */
+    public static class RemoteKeys {
+        public boolean forward, back, left, right, jump, sneak, sprint;
+    }
 
     @Override
     public void onInitializeClient() {
         outputFile = loadOutputPath();
         inputFile = outputFile.resolveSibling("minecraft_bridge_input.json");
         LOGGER.info("RE4 Bridge: writing HUD data to {}, reading input from {}", outputFile, inputFile);
+    }
+
+    /** The keys RE4 is holding, or null when RE4 isn't in control (then the keyboard works as usual). */
+    public static RemoteKeys remoteKeys() {
+        if (keys == null || System.currentTimeMillis() - lastInputTime > REMOTE_TIMEOUT_MS) {
+            return null;
+        }
+        return keys;
     }
 
     // The output path lives in config/re4bridge.txt so it can be changed without rebuilding the mod
@@ -90,7 +117,10 @@ public class Re4Bridge implements ClientModInitializer {
         }
     }
 
-    // Input from RE4: "selected" = hotbar slot picked with 1-9, "swings" = left-click counter
+    private static boolean flag(JsonObject obj, String name) {
+        return obj.has(name) && obj.get(name).getAsBoolean();
+    }
+
     private static void applyInput(Minecraft mc) {
         LocalPlayer player = mc.player;
         if (player == null || Files.notExists(inputFile)) {
@@ -115,6 +145,20 @@ public class Re4Bridge implements ClientModInitializer {
         }
         boolean firstRead = lastInputSeq == -1;
         lastInputSeq = inputSeq;
+        lastInputTime = System.currentTimeMillis();
+
+        if (input.has("keys") && input.get("keys").isJsonObject()) {
+            JsonObject k = input.getAsJsonObject("keys");
+            RemoteKeys next = new RemoteKeys();
+            next.forward = flag(k, "w");
+            next.back = flag(k, "s");
+            next.left = flag(k, "a");
+            next.right = flag(k, "d");
+            next.jump = flag(k, "jump");
+            next.sneak = flag(k, "sneak");
+            next.sprint = flag(k, "sprint");
+            keys = next;
+        }
 
         // Only react when RE4 picks a new slot, so changing slots in Minecraft itself still works
         if (input.has("selected")) {
@@ -129,10 +173,37 @@ public class Re4Bridge implements ClientModInitializer {
             int swings = input.get("swings").getAsInt();
             // A lower count means the RE4 script was reloaded; just resync
             if (swings > lastInputSwings && !firstRead) {
-                player.swing(InteractionHand.MAIN_HAND);
+                attack(player);
             }
             lastInputSwings = swings;
         }
+
+        // Sprinting is started by the sprint key in LocalPlayer.aiStep, which reads the real keyboard
+        RemoteKeys remote = remoteKeys();
+        if (remote != null && remote.sprint && remote.forward && !remote.sneak) {
+            player.setSprinting(true);
+        }
+    }
+
+    // Minecraft's attack math: cooldown, attack damage attribute, critical hits. RE4 applies the result.
+    private static void attack(LocalPlayer player) {
+        float strength = player.getAttackStrengthScale(0.5F);
+        float damage = (float) player.getAttributeValue(Attributes.ATTACK_DAMAGE);
+        boolean crit = strength > 0.9F && player.fallDistance > 0.0F && !player.onGround()
+                && !player.onClimbable() && !player.isInWater() && !player.isPassenger() && !player.isSprinting();
+
+        float total = damage * (0.2F + strength * strength * 0.8F);
+        if (crit) {
+            total *= 1.5F;
+        }
+
+        attackSeq++;
+        lastAttackDamage = total;
+        lastAttackStrength = strength;
+        lastAttackCrit = crit;
+
+        player.swing(InteractionHand.MAIN_HAND);
+        player.resetAttackStrengthTicker();
     }
 
     private static JsonObject buildState(Minecraft mc) {
@@ -154,6 +225,17 @@ public class Re4Bridge implements ClientModInitializer {
         state.addProperty("xp_progress", player.experienceProgress);
         state.addProperty("selected", player.getInventory().selected);
         state.addProperty("game_mode", mc.gameMode != null ? mc.gameMode.getPlayerMode().getName() : "unknown");
+        state.addProperty("re4_control", remoteKeys() != null);
+
+        state.add("move", describeMovement(player));
+
+        JsonObject attack = new JsonObject();
+        attack.addProperty("seq", attackSeq);
+        attack.addProperty("damage", lastAttackDamage);
+        attack.addProperty("strength", lastAttackStrength);
+        attack.addProperty("crit", lastAttackCrit);
+        attack.addProperty("cooldown", player.getAttackStrengthScale(0.0F));
+        state.add("attack", attack);
 
         // Slots are keyed "s0".."s8" instead of a JSON array to avoid 0/1-based index confusion in Lua
         JsonObject hotbar = new JsonObject();
@@ -162,6 +244,32 @@ public class Re4Bridge implements ClientModInitializer {
         }
         state.add("hotbar", hotbar);
         return state;
+    }
+
+    // How far the player moved this tick, relative to where they face (so RE4 can apply it to Leon's camera
+    // direction), plus the height above the last ground for jumps and flying
+    private static JsonObject describeMovement(LocalPlayer player) {
+        double dx = player.getX() - player.xo;
+        double dy = player.getY() - player.yo;
+        double dz = player.getZ() - player.zo;
+        double yaw = Math.toRadians(player.getYRot());
+        double forward = dx * -Math.sin(yaw) + dz * Math.cos(yaw);
+        double right = dx * -Math.cos(yaw) + dz * -Math.sin(yaw);
+
+        if (player.onGround() || Double.isNaN(groundY)) {
+            groundY = player.getY();
+        }
+
+        JsonObject move = new JsonObject();
+        move.addProperty("forward", forward);
+        move.addProperty("right", right);
+        move.addProperty("up", dy);
+        move.addProperty("height", Math.max(0.0, player.getY() - groundY));
+        move.addProperty("on_ground", player.onGround());
+        move.addProperty("flying", player.getAbilities().flying);
+        move.addProperty("sprinting", player.isSprinting());
+        move.addProperty("sneaking", player.isShiftKeyDown());
+        return move;
     }
 
     private static JsonObject describe(ItemStack stack) {

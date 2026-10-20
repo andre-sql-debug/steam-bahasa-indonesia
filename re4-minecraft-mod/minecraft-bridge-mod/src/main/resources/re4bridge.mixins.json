@@ -2,7 +2,10 @@
   "required": true,
   "package": "dev.re4bridge.mixin",
   "compatibilityLevel": "JAVA_21",
-  "client": ["MinecraftMixin"],
+  "client": [
+    "KeyboardInputMixin",
+    "MinecraftMixin"
+  ],
   "injectors": {
     "defaultRequire": 1
   }

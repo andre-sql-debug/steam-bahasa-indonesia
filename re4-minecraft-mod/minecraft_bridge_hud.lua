@@ -1,6 +1,7 @@
 -- Minecraft Bridge HUD for RE4 Remake (REFramework Lua script)
 -- Draws Minecraft's HUD (hotbar, hearts, hunger, XP, held item) using live data from Minecraft,
--- and sends RE4 input back to Minecraft: 1-9 select a hotbar slot, left-click swings the item.
+-- and sends RE4 input back to Minecraft: movement keys (Minecraft moves its player with them and
+-- minecraft_gameplay.lua copies that movement to Leon), 1-9 select a hotbar slot, left-click attacks.
 -- Needs the RE4 Bridge Minecraft mod, which writes reframework\data\minecraft_bridge.json
 -- and reads reframework\data\minecraft_bridge_input.json.
 -- When Minecraft isn't connected, the hearts show Leon's health instead.
@@ -448,7 +449,15 @@ end
 ------------------------------------------------------------------------------
 
 local INPUT_FILE = "minecraft_bridge_input.json"   -- relative to reframework\data
-local input = { seq = 0, swings = 0 }
+local input = { seq = 0, swings = 0, keys = {} }
+local HEARTBEAT_FRAMES = 10   -- Minecraft gives control back to its keyboard if RE4 goes quiet
+
+local MOVE_KEYS = {
+    w = { 0x57 }, a = { 0x41 }, s = { 0x53 }, d = { 0x44 },
+    jump = { 0x20 },
+    sneak = { 0x10, 0xA0, 0xA1 },    -- Shift
+    sprint = { 0x11, 0xA2, 0xA3 },   -- Ctrl
+}
 local number_keys_down = {}
 local mouse_was_down = false
 local input_info = "nothing sent yet"
@@ -464,6 +473,13 @@ end
 local function key_down(key)
     local ok, down = pcall(function() return reframework:is_key_down(key) end)
     return ok and down == true
+end
+
+local function any_key_down(keys)
+    for _, key in ipairs(keys) do
+        if key_down(key) then return true end
+    end
+    return false
 end
 
 -- Not every REFramework build reports mouse buttons the same way, so try both
@@ -486,7 +502,21 @@ local function menu_open()
 end
 
 local function update_input()
-    if menu_open() then return end
+    local changed = frame % HEARTBEAT_FRAMES == 0
+
+    -- With the REFramework menu open, release all keys so Minecraft's player stops
+    local menu = menu_open()
+    for name, keys in pairs(MOVE_KEYS) do
+        local down = not menu and any_key_down(keys)
+        if input.keys[name] ~= down then
+            input.keys[name] = down
+            changed = true
+        end
+    end
+    if menu then
+        if changed then send_input() end
+        return
+    end
 
     for i = 1, 9 do
         local down = key_down(0x30 + i)
@@ -502,9 +532,11 @@ local function update_input()
     if mouse and not mouse_was_down then
         input.swings = input.swings + 1
         swing_frame = frame
-        send_input()
+        changed = true
     end
     mouse_was_down = mouse
+
+    if changed then send_input() end
 end
 
 ------------------------------------------------------------------------------
