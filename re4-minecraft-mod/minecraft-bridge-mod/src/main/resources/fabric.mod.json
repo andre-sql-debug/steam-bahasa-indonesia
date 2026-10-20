@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "re4bridge",
+  "version": "${version}",
+  "name": "RE4 Bridge",
+  "description": "Sends your Minecraft HUD (health, hunger, XP, hotbar) to Resident Evil 4 Remake through a file that an REFramework script reads.",
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": ["dev.re4bridge.Re4Bridge"]
+  },
+  "mixins": ["re4bridge.mixins.json"],
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "minecraft": "~1.21.1",
+    "java": ">=21"
+  }
+}
