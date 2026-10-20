@@ -10,26 +10,36 @@ local settings = {
     up_offset = 0.05,
     hide_head = true,
     crosshair = true,
+    stage = 1,              -- index into STAGES
     show_debug = false,
 }
 
 local KEY_F5 = 0x74
 
+-- Points in the game's frame where we move the camera. The game captures the
+-- camera for drawing around LockScene, so we have to move it before that.
+local STAGES = { "All", "LateUpdateBehavior", "PrepareRendering", "BeforeLockSceneRendering", "LockScene" }
+
 local HEAD_JOINT_NAMES = { "head", "Head", "head_0", "neck_1", "neck_0", "Neck" }
 local PLAYER_OBJECT_METHODS = { "get_BodyGameObject", "get_GameObject", "get_PlayerGameObject" }
+local HEAD_PART_PATTERNS = { "head", "hair", "face", "eye", "lash", "teeth", "tongue" }
 
 local debug = {
     player = "not checked yet",
     head = "not checked yet",
     camera = "not checked yet",
-    forward = "not checked yet",
+    last_stage = "none",
     joints = "",
+    parts = "",
 }
 
 local head_joint = nil
 local head_joint_owner = nil
 local head_hidden = false
+local hidden_meshes = {}
 local f5_was_down = false
+
+local mesh_type = sdk.typeof("via.render.Mesh")
 
 local function try_call(obj, method, ...)
     local args = { ... }
@@ -90,16 +100,59 @@ local function get_head_joint()
         head_joint = find_head_joint(transform)
         head_joint_owner = transform
         head_hidden = false
+        hidden_meshes = {}
     end
     return head_joint, transform
 end
 
--- Re-applied every frame while hidden, in case the animation resets the scale
-local function set_head_hidden(hidden)
+-- Calls fn(game_object, name, depth) for every child object under transform
+local function for_each_child(transform, fn, depth)
+    depth = depth or 1
+    if depth > 4 then return end
+    local child = try_call(transform, "get_Child")
+    while child ~= nil do
+        local go = try_call(child, "get_GameObject")
+        local name = go and try_call(go, "get_Name") or "?"
+        fn(go, name, depth)
+        for_each_child(child, fn, depth + 1)
+        child = try_call(child, "get_Next")
+    end
+end
+
+local function is_head_part(name)
+    local lower = name:lower()
+    for _, pattern in ipairs(HEAD_PART_PATTERNS) do
+        if lower:find(pattern) then return true end
+    end
+    return false
+end
+
+-- Two ways to hide the head: shrink the head joint, and switch off head/hair/face meshes
+local function set_head_hidden(hidden, transform)
     if head_joint == nil then return end
     if not hidden and not head_hidden then return end
+
+    -- The animation may reset the scale every frame, so re-apply it while hidden
     local s = hidden and 0.001 or 1.0
     try_call(head_joint, "set_LocalScale", Vector3f.new(s, s, s))
+
+    if hidden and not head_hidden and transform ~= nil then
+        for_each_child(transform, function(go, name)
+            if go ~= nil and is_head_part(name) then
+                local mesh = try_call(go, "getComponent(System.Type)", mesh_type)
+                if mesh ~= nil then
+                    try_call(mesh, "set_Enabled", false)
+                    table.insert(hidden_meshes, mesh)
+                end
+            end
+        end)
+    elseif not hidden then
+        for _, mesh in ipairs(hidden_meshes) do
+            try_call(mesh, "set_Enabled", true)
+        end
+        hidden_meshes = {}
+    end
+
     head_hidden = hidden
 end
 
@@ -125,6 +178,20 @@ local function list_joints()
     debug.joints = #names > 0 and table.concat(names, ", ") or "no head/neck joints"
 end
 
+-- Lists Leon's child objects (body parts, weapons...) so we can see which ones are the head
+local function list_parts()
+    local _, transform = get_head_joint()
+    if transform == nil then
+        debug.parts = "player not found"
+        return
+    end
+    local names = {}
+    for_each_child(transform, function(_, name, depth)
+        table.insert(names, string.rep("  ", depth - 1) .. name)
+    end)
+    debug.parts = #names > 0 and table.concat(names, "\n") or "no child objects"
+end
+
 local function update_toggle_key()
     local ok, down = pcall(function() return reframework:is_key_down(KEY_F5) end)
     if not ok then return end
@@ -134,14 +201,14 @@ local function update_toggle_key()
     f5_was_down = down
 end
 
--- Runs right before the frame is drawn, after the game has placed its own camera
-re.on_pre_application_entry("BeginRendering", function()
-    update_toggle_key()
+local function update_camera(stage)
+    local selected = STAGES[settings.stage]
+    if selected ~= "All" and selected ~= stage then return end
 
-    local joint = get_head_joint()
+    local joint, transform = get_head_joint()
     if joint == nil then return end
 
-    set_head_hidden(settings.first_person and settings.hide_head)
+    set_head_hidden(settings.first_person and settings.hide_head, transform)
     if not settings.first_person then return end
 
     local camera = sdk.get_primary_camera()
@@ -151,7 +218,6 @@ re.on_pre_application_entry("BeginRendering", function()
         debug.camera = "camera not found"
         return
     end
-    debug.camera = "ok"
 
     local pos = try_call(joint, "get_Position")
     if pos == nil then
@@ -166,14 +232,19 @@ re.on_pre_application_entry("BeginRendering", function()
         local ok, forward = pcall(function() return rot * Vector3f.new(0, 0, -1) end)
         if ok and forward ~= nil then
             new_pos = new_pos + forward * settings.forward_offset
-            debug.forward = "ok"
-        else
-            debug.forward = "could not compute forward"
         end
     end
 
     try_call(cam_transform, "set_Position", new_pos)
-end)
+    debug.camera = "moved (camera: " .. tostring(try_call(cam_obj, "get_Name")) .. ")"
+    debug.last_stage = stage
+end
+
+re.on_pre_application_entry("UpdateBehavior", update_toggle_key)
+re.on_application_entry("LateUpdateBehavior", function() update_camera("LateUpdateBehavior") end)
+re.on_pre_application_entry("PrepareRendering", function() update_camera("PrepareRendering") end)
+re.on_pre_application_entry("BeforeLockSceneRendering", function() update_camera("BeforeLockSceneRendering") end)
+re.on_pre_application_entry("LockScene", function() update_camera("LockScene") end)
 
 local function get_screen_size()
     local ok, size = pcall(imgui.get_display_size)
@@ -208,23 +279,23 @@ re.on_draw_ui(function()
         changed, settings.crosshair = imgui.checkbox("Crosshair", settings.crosshair)
         changed, settings.forward_offset = imgui.slider_float("Forward offset", settings.forward_offset, -0.5, 0.5)
         changed, settings.up_offset = imgui.slider_float("Up offset", settings.up_offset, -0.3, 0.3)
+        changed, settings.stage = imgui.combo("Camera timing", settings.stage, STAGES)
         changed, settings.show_debug = imgui.checkbox("Show debug info", settings.show_debug)
         if settings.show_debug then
             imgui.text("Player: " .. debug.player)
             imgui.text("Head: " .. debug.head)
             imgui.text("Camera: " .. debug.camera)
-            imgui.text("Forward: " .. debug.forward)
-            if imgui.button("List joints") then
-                list_joints()
-            end
-            if debug.joints ~= "" then
-                imgui.text("Joints: " .. debug.joints)
-            end
+            imgui.text("Last timing used: " .. debug.last_stage)
+            if imgui.button("List joints") then list_joints() end
+            imgui.same_line()
+            if imgui.button("List parts") then list_parts() end
+            if debug.joints ~= "" then imgui.text("Joints: " .. debug.joints) end
+            if debug.parts ~= "" then imgui.text("Parts:\n" .. debug.parts) end
         end
         imgui.tree_pop()
     end
 end)
 
 re.on_script_reset(function()
-    set_head_hidden(false)
+    set_head_hidden(false, head_joint_owner)
 end)
