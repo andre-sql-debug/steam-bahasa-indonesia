@@ -13,6 +13,7 @@ local settings = {
     survival_bars_in_creative = false,
     held_item = true,
     send_input = true,
+    hide_re4_ui = true,
     show_debug = false,
 }
 
@@ -506,6 +507,69 @@ local function update_input()
     mouse_was_down = mouse
 end
 
+------------------------------------------------------------------------------
+-- Hiding RE4's own UI
+------------------------------------------------------------------------------
+
+local HIDDEN_GUI_FILE = "minecraft_hidden_gui.json"   -- relative to reframework\data
+local hidden_gui = {}
+local gui_seen = {}   -- element name -> last frame it was drawn
+
+do
+    local ok, saved = pcall(json.load_file, HIDDEN_GUI_FILE)
+    if ok and type(saved) == "table" then
+        for _, name in ipairs(saved) do hidden_gui[name] = true end
+    end
+end
+
+local function save_hidden_gui()
+    local list = {}
+    for name in pairs(hidden_gui) do table.insert(list, name) end
+    table.sort(list)
+    pcall(json.dump_file, HIDDEN_GUI_FILE, list)
+end
+
+local function visible_gui_names()
+    local names = {}
+    for name, last in pairs(gui_seen) do
+        if frame - last < 60 or hidden_gui[name] then table.insert(names, name) end
+    end
+    table.sort(names)
+    return names
+end
+
+-- Called by REFramework for every RE4 UI element before it is drawn; false = don't draw it
+re.on_pre_gui_draw_element(function(element, context)
+    local ok, name = pcall(function() return element:call("get_GameObject"):call("get_Name") end)
+    if not ok or name == nil then return true end
+    gui_seen[name] = frame
+    if settings.hide_re4_ui and hidden_gui[name] then return false end
+    return true
+end)
+
+local function draw_gui_picker()
+    if not imgui.tree_node("Hide RE4 UI elements") then return end
+    imgui.text("Elements on screen right now. Ticked ones are hidden.")
+    imgui.text("Tip: during normal gameplay (aim a gun so ammo shows), press the button below.")
+    if imgui.button("Hide everything on screen now") then
+        for _, name in ipairs(visible_gui_names()) do hidden_gui[name] = true end
+        save_hidden_gui()
+    end
+    imgui.same_line()
+    if imgui.button("Show all again") then
+        hidden_gui = {}
+        save_hidden_gui()
+    end
+    for _, name in ipairs(visible_gui_names()) do
+        local changed, hide = imgui.checkbox(name, hidden_gui[name] == true)
+        if changed then
+            hidden_gui[name] = hide or nil
+            save_hidden_gui()
+        end
+    end
+    imgui.tree_pop()
+end
+
 local function get_screen_size()
     local ok, size = pcall(imgui.get_display_size)
     if ok and size ~= nil and size.x > 0 then
@@ -570,6 +634,8 @@ re.on_draw_ui(function()
         changed, settings.survival_bars_in_creative = imgui.checkbox("Show hearts/hunger/XP in Creative", settings.survival_bars_in_creative)
         changed, settings.held_item = imgui.checkbox("Show held item", settings.held_item)
         changed, settings.send_input = imgui.checkbox("Send 1-9 and left-click to Minecraft", settings.send_input)
+        changed, settings.hide_re4_ui = imgui.checkbox("Hide picked RE4 UI elements", settings.hide_re4_ui)
+        draw_gui_picker()
         imgui.text(is_connected() and "Minecraft: connected" or "Minecraft: not connected (showing Leon's health)")
         changed, settings.show_debug = imgui.checkbox("Show debug info", settings.show_debug)
         if settings.show_debug then

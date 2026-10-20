@@ -40,8 +40,15 @@ local KEY = {
 }
 local DOUBLE_TAP_SECONDS = 0.3
 
--- Points in the frame where we replace Leon's movement; the menu lets you try each
-local TIMINGS = { "LateUpdateBehavior (before)", "UpdateMotion (after)", "LateUpdateBehavior (after)" }
+-- Ways to replace Leon's movement; the menu lets you try each.
+-- "Position": put Leon at (start of frame + Minecraft movement) right before RE4's collision
+-- check, so walls and floors still block him. The others feed the movement to GroundAdsorber.
+local TIMINGS = {
+    "Position, before collision",
+    "GroundAdsorber, LateUpdateBehavior (before)",
+    "GroundAdsorber, UpdateMotion (after)",
+    "GroundAdsorber, LateUpdateBehavior (after)",
+}
 
 -- Minecraft attack damage (in half hearts) and attack speed (attacks per second)
 local WEAPONS = {
@@ -74,6 +81,7 @@ local state = {
     last_space_time = -10,
     last_attack_time = -10,
     time = 0,
+    frame_start_pos = nil,
 }
 local keys_was_down = {}
 local mouse_was_down = false
@@ -237,8 +245,8 @@ local function set_gravity(player, on)
     try_call(player.adsorber, "set_EnabledCheckGround", on)
 end
 
-local function update_walking(player, dt)
-    if player.adsorber == nil then
+local function update_walking(player, dt, use_position)
+    if not use_position and player.adsorber == nil then
         debug.movement = "GroundAdsorber not found"
         return
     end
@@ -286,7 +294,19 @@ local function update_walking(player, dt)
     end
 
     local delta = Vector3f.new(state.velocity.x * dt, state.vertical * dt, state.velocity.z * dt)
-    try_call(player.adsorber, "set_MotionDeltaPosition", delta)
+    if use_position then
+        local start = state.frame_start_pos
+        local current = player.transform and try_call(player.transform, "get_Position")
+        if start == nil or current == nil then
+            debug.movement = "position not found"
+            return
+        end
+        -- Ignore RE4's horizontal movement; keep its vertical (ground, stairs) unless we're jumping
+        local y = state.jumping and (start.y + delta.y) or current.y
+        try_call(player.transform, "set_Position", Vector3f.new(start.x + delta.x, y, start.z + delta.z))
+    else
+        try_call(player.adsorber, "set_MotionDeltaPosition", delta)
+    end
     debug.movement = string.format("moving %.2f m/s%s", length_xz(state.velocity), state.jumping and " (jumping)" or "")
 end
 
@@ -448,7 +468,7 @@ local function update(timing)
     if state.flying then
         update_flying(player, dt)
     elseif settings.movement then
-        update_walking(player, dt)
+        update_walking(player, dt, settings.timing == 1)
     else
         debug.movement = "off (F7)"
     end
@@ -456,9 +476,16 @@ local function update(timing)
     if settings.combat and mouse_clicked() then attack() end
 end
 
-re.on_pre_application_entry("LateUpdateBehavior", function() update(TIMINGS[1]) end)
-re.on_application_entry("UpdateMotion", function() update(TIMINGS[2]) end)
-re.on_application_entry("LateUpdateBehavior", function() update(TIMINGS[3]) end)
+-- Where Leon is before RE4 moves him this frame
+re.on_pre_application_entry("UpdateBehavior", function()
+    local player = get_player()
+    state.frame_start_pos = player and player.transform and try_call(player.transform, "get_Position")
+end)
+
+re.on_pre_application_entry("UpdatePhysicsCharacterController", function() update(TIMINGS[1]) end)
+re.on_pre_application_entry("LateUpdateBehavior", function() update(TIMINGS[2]) end)
+re.on_application_entry("UpdateMotion", function() update(TIMINGS[3]) end)
+re.on_application_entry("LateUpdateBehavior", function() update(TIMINGS[4]) end)
 
 re.on_draw_ui(function()
     if imgui.tree_node("Minecraft Gameplay") then
@@ -468,7 +495,7 @@ re.on_draw_ui(function()
         changed, settings.combat = imgui.checkbox("Melee combat (left-click)", settings.combat)
         changed, settings.no_damage = imgui.checkbox("No damage", settings.no_damage)
         changed, settings.fly_speed = imgui.slider_float("Fly speed (m/s)", settings.fly_speed, 2.0, 40.0)
-        changed, settings.timing = imgui.combo("Movement timing", settings.timing, TIMINGS)
+        changed, settings.timing = imgui.combo("Movement method", settings.timing, TIMINGS)
         imgui.text(state.flying and "Flying (F6 to land)" or "Walking")
         changed, settings.show_debug = imgui.checkbox("Show debug info", settings.show_debug)
         if settings.show_debug then

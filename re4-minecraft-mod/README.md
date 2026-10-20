@@ -18,6 +18,7 @@ Copy the `.lua` files into `<RE4 game folder>\reframework\autorun\`. Settings: p
 - `minecraft_bridge_hud.lua`: Minecraft HUD (hotbar, hearts, hunger, XP, held item) from live Minecraft data.
   In RE4, **1-9** pick the Minecraft hotbar slot and **left-click** swings the held item (in RE4 and Minecraft).
   Without Minecraft running, it shows Leon's health as hearts.
+  **Hide RE4 UI elements** in its menu hides RE4's own HUD (saved to `reframework\data\minecraft_hidden_gui.json`).
 - `minecraft_first_person.lua`: first-person camera (toggle with **F5**) and Minecraft's `+` crosshair.
 - `minecraft_gameplay.lua`: Minecraft movement (walk 4.3 m/s, Ctrl sprint, Shift sneak, Space jump 1.25 m),
   flying (double-tap **Space** in Creative or **F6**), no damage, and melee combat: left-click hits the enemy in
