@@ -43,6 +43,10 @@ local KEY = {
 }
 local DOUBLE_TAP_SECONDS = 0.3
 local TICKS_PER_SECOND = 20
+-- Hands off Leon while the game places him: after he appears (loading a save) and after teleports
+local SETTLE_FRAMES_AFTER_LOAD = 180      -- ~3 s
+local SETTLE_FRAMES_AFTER_TELEPORT = 60   -- ~1 s
+local TELEPORT_DISTANCE = 2.0             -- meters in one frame that only the game itself does
 local JUMP_PREDICT_SECONDS = 0.15   -- how long we show a predicted jump before Minecraft confirms it
 local MOB_HEALTH = 20          -- RE4 enemies take damage as if they were zombies (20 health)
 
@@ -83,6 +87,9 @@ local state = {
     floor_y = nil,          -- RE4's floor height under Leon while Minecraft's player is on its flat ground
     smooth_y = nil,
     probe = nil,            -- movement recorder
+    frame = 0,
+    settle_until = 0,       -- frame until which we leave Leon completely to the game
+    player_present = false,
     time = 0,
     frame_start_pos = nil,
 }
@@ -623,10 +630,32 @@ end
 
 -- Where Leon is before RE4 moves him this frame
 re.on_pre_application_entry("UpdateBehavior", function()
+    state.frame = state.frame + 1
     local player = get_player()
     state.frame_start_pos = player and player.transform and try_call(player.transform, "get_Position")
     state.controlling = false
     probe_set("start", state.frame_start_pos)
+
+    -- Leon just appeared (save loaded): let the game finish placing him and loading the area
+    if state.frame_start_pos == nil then
+        state.player_present = false
+        return
+    end
+    if not state.player_present then
+        state.player_present = true
+        state.settle_until = state.frame + SETTLE_FRAMES_AFTER_LOAD
+        state.auth_pos = nil
+    end
+
+    -- The game moved Leon far in one frame (loading, cutscene, door): drop our hold on him
+    local held = state.auth_pos
+    if held ~= nil then
+        local dx, dy, dz = held.x - state.frame_start_pos.x, held.y - state.frame_start_pos.y, held.z - state.frame_start_pos.z
+        if dx * dx + dy * dy + dz * dz > TELEPORT_DISTANCE * TELEPORT_DISTANCE then
+            state.auth_pos = nil
+            state.settle_until = state.frame + SETTLE_FRAMES_AFTER_TELEPORT
+        end
+    end
 end)
 
 -- Right after RE4's collision check: this is where Leon should stay for the rest of the frame
@@ -665,6 +694,18 @@ re.on_pre_application_entry("UpdatePhysicsCharacterController", function()
 
     if settings.no_damage then keep_full_health(player) end
     if pressed(KEY.F7) and not menu_open() then settings.movement = not settings.movement end
+
+    if state.frame < state.settle_until then
+        -- Give everything back to the game while it loads or teleports Leon
+        set_vertical(player, nil)
+        if state.flying then set_flying(player, false) end
+        state.velocity = Vector3f.new(0, 0, 0)
+        state.predicted_jump_time = nil
+        state.smooth_y = nil
+        state.floor_y = nil
+        debug.movement = "waiting for the game to place Leon (loading/teleport)"
+        return
+    end
 
     if minecraft_in_control() then
         debug.mode = "Minecraft (movement and attacks come from Minecraft)"

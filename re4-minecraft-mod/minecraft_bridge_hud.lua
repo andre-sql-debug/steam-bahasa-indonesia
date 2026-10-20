@@ -876,6 +876,8 @@ end
 local show_re4_ui = false     -- F8
 local f8_was_down = false
 local leon_present = false    -- RE4's title and loading menus stay visible
+local leon_seen_frame = nil   -- when Leon appeared; RE4's loading screen and fade-in still run after that
+local HIDE_UI_AFTER_FRAMES = 300   -- ~5 s
 
 local function update_ui_toggle()
     local down = false
@@ -887,7 +889,13 @@ local function update_ui_toggle()
     if frame % 30 == 0 then
         local cm = sdk.get_managed_singleton(sdk.game_namespace("CharacterManager"))
         local ok_ctx, ctx = pcall(function() return cm:call("getPlayerContextRef") end)
-        leon_present = ok_ctx and ctx ~= nil
+        local present = ok_ctx and ctx ~= nil
+        if not present then
+            leon_seen_frame = nil
+        elseif leon_seen_frame == nil then
+            leon_seen_frame = frame
+        end
+        leon_present = present and frame - leon_seen_frame >= HIDE_UI_AFTER_FRAMES
     end
 end
 

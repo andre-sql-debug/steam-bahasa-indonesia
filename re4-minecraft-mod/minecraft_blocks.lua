@@ -36,6 +36,8 @@ local frame = 0
 local sync_seq = 0
 local f9_was_down = false
 local quad_mode = nil         -- "quad" if draw.filled_quad works, else "lines"
+local last_leon = nil         -- to notice when the game teleports Leon to another area
+local REANCHOR_DISTANCE = 20
 local debug = { faces = 0, status = "waiting for Minecraft" }
 
 local function try_call(obj, method, ...)
@@ -259,7 +261,16 @@ re.on_frame(function()
     end
 
     local leon = leon_position()
-    if leon == nil then return end
+    if leon == nil then
+        last_leon = nil
+        return
+    end
+    -- New area (save loaded, door, cutscene): line the two worlds up again here
+    if last_leon ~= nil then
+        local dx, dz = leon.x - last_leon.x, leon.z - last_leon.z
+        if dx * dx + dz * dz > REANCHOR_DISTANCE * REANCHOR_DISTANCE then reanchor = true end
+    end
+    last_leon = Vector3f.new(leon.x, leon.y, leon.z)
     if anchor_re4 == nil or reanchor then set_anchor(leon) end
 
     if frame % SYNC_EVERY_FRAMES == 0 then write_sync(leon) end
