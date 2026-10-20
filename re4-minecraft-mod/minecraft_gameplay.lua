@@ -43,6 +43,7 @@ local KEY = {
 }
 local DOUBLE_TAP_SECONDS = 0.3
 local TICKS_PER_SECOND = 20
+local JUMP_PREDICT_SECONDS = 0.15   -- how long we show a predicted jump before Minecraft confirms it
 local MOB_HEALTH = 20          -- RE4 enemies take damage as if they were zombies (20 health)
 
 -- Fallback weapon stats without Minecraft: damage, attacks per second
@@ -78,6 +79,7 @@ local state = {
     last_space_time = -10,
     last_attack_time = -10,
     last_attack_seq = nil,
+    predicted_jump_time = nil,
     time = 0,
     frame_start_pos = nil,
 }
@@ -255,6 +257,37 @@ end
 -- Movement from Minecraft
 ------------------------------------------------------------------------------
 
+local function local_keys()
+    return {
+        w = key_down(KEY.W), a = key_down(KEY.A), s = key_down(KEY.S), d = key_down(KEY.D),
+        jump = key_down(KEY.SPACE), sneak = key_down(KEY.SNEAK), sprint = key_down(KEY.SPRINT),
+    }
+end
+
+-- Has Minecraft already used the keys we're holding right now?
+local function minecraft_caught_up(keys)
+    local used = bridge.keys
+    if type(used) ~= "table" then return true end
+    for _, name in ipairs({ "w", "a", "s", "d", "sneak", "sprint" }) do
+        if (used[name] == true) ~= keys[name] then return false end
+    end
+    return true
+end
+
+-- Built-in Minecraft movement for the few frames until Minecraft answers a key press
+local function predicted_velocity(keys, forward, right, dt)
+    local dir = Vector3f.new(0, 0, 0)
+    if keys.w then dir = dir + forward end
+    if keys.s then dir = dir - forward end
+    if keys.d then dir = dir + right end
+    if keys.a then dir = dir - right end
+    local len = length_xz(dir)
+    if len > 0.001 then dir = dir * (1 / len) end
+    local speed = keys.sneak and MC.sneak or ((keys.sprint and keys.w) and MC.sprint or MC.walk)
+    state.velocity = state.velocity + (dir * speed - state.velocity) * math.min(1, MC.accel * dt)
+    return state.velocity
+end
+
 local function update_from_minecraft(player, dt)
     local move = bridge.move
     local forward, right = camera_vectors()
@@ -263,11 +296,34 @@ local function update_from_minecraft(player, dt)
         return
     end
 
-    -- Minecraft moved this far during one tick; turn it into a speed and apply it this frame
-    local velocity = (forward * (move.forward or 0) + right * (move.right or 0)) * TICKS_PER_SECOND
+    -- Minecraft moved this far during one tick; turn it into a speed and apply it this frame.
+    -- Until Minecraft has seen a new key press, predict with the same numbers so there's no delay.
+    local keys = local_keys()
+    local velocity
+    local predicting = not minecraft_caught_up(keys)
+    if predicting then
+        velocity = predicted_velocity(keys, forward, right, dt)
+    else
+        velocity = (forward * (move.forward or 0) + right * (move.right or 0)) * TICKS_PER_SECOND
+        state.velocity = velocity
+    end
+
+    -- A jump press starts a predicted jump right away; Minecraft's real jump takes over when it arrives
+    local mc_height = move.height or 0
+    if keys.jump and not state.airborne and state.predicted_jump_time == nil and move.on_ground ~= false then
+        state.predicted_jump_time = state.time
+    end
+    if state.predicted_jump_time ~= nil and (mc_height > 0.01 or state.time - state.predicted_jump_time > JUMP_PREDICT_SECONDS) then
+        state.predicted_jump_time = nil
+    end
+    local predicted_height = nil
+    if state.predicted_jump_time ~= nil then
+        local t = state.time - state.predicted_jump_time
+        predicted_height = math.max(0, MC.jump_velocity * t - 0.5 * MC.gravity * t * t)
+    end
 
     -- Jumping and flying: Leon's height follows the Minecraft player's height above its ground
-    local airborne = move.flying == true or (move.height or 0) > 0.01
+    local airborne = move.flying == true or mc_height > 0.01 or predicted_height ~= nil
     local start = state.frame_start_pos
     if airborne and not state.airborne and start ~= nil then
         state.airborne = true
@@ -289,13 +345,17 @@ local function update_from_minecraft(player, dt)
     local y = nil
     if state.airborne then
         -- Minecraft updates 20 times per second; ease toward its height so the jump looks smooth
-        local target = state.base_y + (move.height or 0)
-        state.smooth_y = state.smooth_y + (target - state.smooth_y) * math.min(1, 20 * dt)
+        if predicted_height ~= nil then
+            state.smooth_y = state.base_y + predicted_height
+        else
+            local target = state.base_y + mc_height
+            state.smooth_y = state.smooth_y + (target - state.smooth_y) * math.min(1, 20 * dt)
+        end
         y = state.smooth_y
     end
 
     if move_leon(player, velocity.x * dt, velocity.z * dt, y) then
-        debug.movement = string.format("Minecraft: %.2f m/s%s%s%s", length_xz(velocity),
+        debug.movement = string.format("%s: %.2f m/s%s%s%s", predicting and "predicting" or "Minecraft", length_xz(velocity),
             move.sprinting and " sprinting" or "", move.flying and " flying" or "",
             state.airborne and string.format(" height %.2f", move.height or 0) or "")
     end

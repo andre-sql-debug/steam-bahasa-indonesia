@@ -99,6 +99,22 @@ public class Re4Bridge implements ClientModInitializer {
         return Paths.get(DEFAULT_OUTPUT);
     }
 
+    // Start of the tick: take RE4's keys now, so they move the player in this same tick
+    public static void onClientTickStart(Minecraft mc) {
+        if (outputFile == null) {
+            return;
+        }
+        try {
+            applyInput(mc);
+        } catch (Exception e) {
+            if (!warnedWrite) {
+                LOGGER.warn("RE4 Bridge: could not read {}", inputFile, e);
+                warnedWrite = true;
+            }
+        }
+    }
+
+    // End of the tick: send the result to RE4
     public static void onClientTick(Minecraft mc) {
         if (outputFile == null) {
             return;
@@ -107,7 +123,6 @@ public class Re4Bridge implements ClientModInitializer {
         mc.options.pauseOnLostFocus = false;
 
         try {
-            applyInput(mc);
             write(buildState(mc).toString());
         } catch (Exception e) {
             if (!warnedWrite) {
@@ -226,6 +241,20 @@ public class Re4Bridge implements ClientModInitializer {
         state.addProperty("selected", player.getInventory().selected);
         state.addProperty("game_mode", mc.gameMode != null ? mc.gameMode.getPlayerMode().getName() : "unknown");
         state.addProperty("re4_control", remoteKeys() != null);
+
+        // The keys this tick used, so RE4 knows when Minecraft has caught up with a key press
+        RemoteKeys used = remoteKeys();
+        if (used != null) {
+            JsonObject k = new JsonObject();
+            k.addProperty("w", used.forward);
+            k.addProperty("a", used.left);
+            k.addProperty("s", used.back);
+            k.addProperty("d", used.right);
+            k.addProperty("jump", used.jump);
+            k.addProperty("sneak", used.sneak);
+            k.addProperty("sprint", used.sprint);
+            state.add("keys", k);
+        }
 
         state.add("move", describeMovement(player));
 
