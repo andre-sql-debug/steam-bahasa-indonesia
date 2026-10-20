@@ -14,7 +14,8 @@ local settings = {
     survival_bars_in_creative = false,
     held_item = true,
     send_input = true,
-    hide_re4_ui = true,
+    hide_all_re4_ui = true,     -- while Leon is in the game; F8 shows RE4's UI again
+    hide_re4_ui = true,         -- picked elements (used when hide_all_re4_ui is off)
     show_debug = false,
 }
 
@@ -362,14 +363,70 @@ local function item_look(item)
     }, letter
 end
 
+------------------------------------------------------------------------------
+-- Real Minecraft item textures, sent by the Minecraft mod (16x16 pixels per item)
+------------------------------------------------------------------------------
+
+local TEXTURES_FILE = "minecraft_textures.json"   -- relative to reframework\data
+local textures = {}           -- item id -> 256 colors (0xAABBGGRR, like draw.* uses)
+local glint_textures = {}     -- same, tinted purple for enchanted items
+local textures_version = nil
+
+local function load_textures()
+    if data == nil or data.textures_version == nil or data.textures_version == textures_version then return end
+    local ok, t = pcall(json.load_file, TEXTURES_FILE)
+    if not ok or type(t) ~= "table" or type(t.items) ~= "table" then return end
+    textures_version = data.textures_version
+    for id, hex in pairs(t.items) do
+        if textures[id] == nil and type(hex) == "string" and #hex == 256 * 8 then
+            local pixels = {}
+            for i = 0, 255 do
+                pixels[i + 1] = tonumber(hex:sub(i * 8 + 1, i * 8 + 8), 16) or 0
+            end
+            textures[id] = pixels
+        end
+    end
+end
+
+local function enchanted_texture(id)
+    if glint_textures[id] == nil then
+        local tinted = {}
+        for i, c in ipairs(textures[id]) do
+            local r, g, b = c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF
+            tinted[i] = (c & 0xFF000000) | (((b * 2 + GLINT[3]) // 3) << 16) | (((g * 2 + GLINT[2]) // 3) << 8) | ((r * 2 + GLINT[1]) // 3)
+        end
+        glint_textures[id] = tinted
+    end
+    return glint_textures[id]
+end
+
+-- The item's 16x16 texture, or nil if Minecraft hasn't sent one
+local function item_texture(item)
+    if textures[item.id] == nil then return nil end
+    return item.enchanted and enchanted_texture(item.id) or textures[item.id]
+end
+
+local function draw_texture(pixels, x, y, size)
+    for i = 0, 255 do
+        local c = pixels[i + 1]
+        if (c >> 24) > 16 then
+            draw.filled_rect(x + (i % 16) * size, y + (i // 16) * size, size, size, c | 0xFF000000)
+        end
+    end
+end
+
 local function draw_item(item, x, y, px)
     if item == nil or item.id == nil then return end
-    local ipx = px * 2   -- 8x8 sprites drawn at 16x16 GUI units
 
-    local sprite, palette, letter = item_look(item)
-    draw_sprite(sprite, x, y, ipx, palette)
-    if letter ~= nil then
-        shadow_text(letter, x + 6 * px, y + 5 * px, WHITE)
+    local texture = item_texture(item)
+    if texture ~= nil then
+        draw_texture(texture, x, y, px)
+    else
+        local sprite, palette, letter = item_look(item)
+        draw_sprite(sprite, x, y, px * 2, palette)   -- 8x8 sprites drawn at 16x16 GUI units
+        if letter ~= nil then
+            shadow_text(letter, x + 6 * px, y + 5 * px, WHITE)
+        end
     end
 
     if item.max_damage ~= nil and item.damage ~= nil and item.damage > 0 then
@@ -424,9 +481,22 @@ local function draw_sprite_rotated(sprite, pivot_x, pivot_y, size, angle, palett
     end
 end
 
+-- Same, for a 16x16 texture
+local function draw_texture_rotated(pixels, pivot_x, pivot_y, size, angle)
+    local c, s = math.cos(angle), math.sin(angle)
+    for i = 0, 255 do
+        local color = pixels[i + 1]
+        if (color >> 24) > 16 then
+            local lx = (i % 16 + 0.5) * size
+            local ly = (i // 16 + 0.5 - 16) * size
+            local rx, ry = lx * c - ly * s, lx * s + ly * c
+            draw.filled_rect(pivot_x + rx - size / 2, pivot_y + ry - size / 2, size + 1, size + 1, color | 0xFF000000)
+        end
+    end
+end
+
 local function draw_held_item(w, h, px, item)
     if item == nil or item.id == nil then return end
-    local sprite, palette = item_look(item)
 
     -- Swing: the item dips toward the crosshair and back, like in Minecraft
     local t = 0
@@ -441,7 +511,13 @@ local function draw_held_item(w, h, px, item)
     local size = 9 * px
     local pivot_x = w * 0.70 - swing * size * 6
     local pivot_y = h * 0.97 - swing * size * 2
-    draw_sprite_rotated(sprite, pivot_x, pivot_y, size, -swing * 0.9, palette)
+    local texture = item_texture(item)
+    if texture ~= nil then
+        draw_texture_rotated(texture, pivot_x, pivot_y, size / 2, -swing * 0.9)
+    else
+        local sprite, palette = item_look(item)
+        draw_sprite_rotated(sprite, pivot_x, pivot_y, size, -swing * 0.9, palette)
+    end
 end
 
 ------------------------------------------------------------------------------
@@ -449,7 +525,7 @@ end
 ------------------------------------------------------------------------------
 
 local INPUT_FILE = "minecraft_bridge_input.json"   -- relative to reframework\data
-local input = { seq = 0, swings = 0, keys = {} }
+local input = { seq = 0, swings = 0, uses = 0, keys = {} }
 local HEARTBEAT_FRAMES = 10   -- Minecraft gives control back to its keyboard if RE4 goes quiet
 
 local MOVE_KEYS = {
@@ -460,6 +536,7 @@ local MOVE_KEYS = {
 }
 local number_keys_down = {}
 local mouse_was_down = false
+local right_was_down = false
 local input_info = "nothing sent yet"
 local mouse_source = "none"
 local select_frame = -1000
@@ -496,9 +573,29 @@ local function mouse_down()
     return false
 end
 
+local function right_mouse_down()
+    if key_down(0x02) then return true end
+    local ok, down = pcall(imgui.is_mouse_down, 1)
+    return ok and down == true
+end
+
 local function menu_open()
     local ok, open = pcall(function() return reframework:is_drawing_ui() end)
     return ok and open == true
+end
+
+-- Leon's look direction in Minecraft's terms (yaw 0 = +Z, pitch positive = looking down),
+-- so Minecraft's player aims its placing and breaking where Leon looks
+local function camera_yaw_pitch()
+    local camera = sdk.get_primary_camera()
+    local ok, f = pcall(function()
+        local rot = camera:call("get_GameObject"):call("get_Transform"):call("get_Rotation")
+        return rot * Vector3f.new(0, 0, -1)
+    end)
+    if not ok or f == nil then return nil end
+    local yaw = math.deg(math.atan(-f.x, f.z))
+    local pitch = -math.deg(math.asin(math.max(-1, math.min(1, f.y))))
+    return yaw, pitch
 end
 
 local function update_input()
@@ -528,13 +625,33 @@ local function update_input()
         number_keys_down[i] = down
     end
 
+    local yaw, pitch = camera_yaw_pitch()
+    if yaw ~= nil and (input.yaw == nil or math.abs(yaw - input.yaw) > 0.3 or math.abs(pitch - input.pitch) > 0.3) then
+        input.yaw = math.floor(yaw * 100) / 100
+        input.pitch = math.floor(pitch * 100) / 100
+        changed = true
+    end
+
+    -- Left: attack / break (held = keep mining). Right: Minecraft's "use" (place blocks...)
     local mouse = mouse_down()
     if mouse and not mouse_was_down then
         input.swings = input.swings + 1
         swing_frame = frame
         changed = true
     end
+    if input.keys.attack ~= mouse then
+        input.keys.attack = mouse
+        changed = true
+    end
     mouse_was_down = mouse
+
+    local right = right_mouse_down()
+    if right and not right_was_down then
+        input.uses = input.uses + 1
+        swing_frame = frame
+        changed = true
+    end
+    right_was_down = right
 
     if changed then send_input() end
 end
@@ -570,11 +687,31 @@ local function visible_gui_names()
     return names
 end
 
+local show_re4_ui = false     -- F8
+local f8_was_down = false
+local leon_present = false    -- RE4's title and loading menus stay visible
+
+local function update_ui_toggle()
+    local down = false
+    local ok, d = pcall(function() return reframework:is_key_down(0x77) end)
+    down = ok and d == true
+    if down and not f8_was_down then show_re4_ui = not show_re4_ui end
+    f8_was_down = down
+
+    if frame % 30 == 0 then
+        local cm = sdk.get_managed_singleton(sdk.game_namespace("CharacterManager"))
+        local ok_ctx, ctx = pcall(function() return cm:call("getPlayerContextRef") end)
+        leon_present = ok_ctx and ctx ~= nil
+    end
+end
+
 -- Called by REFramework for every RE4 UI element before it is drawn; false = don't draw it
 re.on_pre_gui_draw_element(function(element, context)
     local ok, name = pcall(function() return element:call("get_GameObject"):call("get_Name") end)
     if not ok or name == nil then return true end
     gui_seen[name] = frame
+    if show_re4_ui then return true end
+    if settings.hide_all_re4_ui then return not leon_present end
     if settings.hide_re4_ui and hidden_gui[name] then return false end
     return true
 end)
@@ -617,7 +754,9 @@ re.on_frame(function()
     frames_since_change = frames_since_change + 1
     if frame % READ_EVERY_FRAMES == 0 then
         read_bridge()
+        load_textures()
     end
+    update_ui_toggle()
 
     if not settings.enabled then return end
 
@@ -665,9 +804,12 @@ re.on_draw_ui(function()
         changed, settings.scale = imgui.slider_int("Size (0 = auto)", settings.scale, 0, 8)
         changed, settings.survival_bars_in_creative = imgui.checkbox("Show hearts/hunger/XP in Creative", settings.survival_bars_in_creative)
         changed, settings.held_item = imgui.checkbox("Show held item", settings.held_item)
-        changed, settings.send_input = imgui.checkbox("Send 1-9 and left-click to Minecraft", settings.send_input)
-        changed, settings.hide_re4_ui = imgui.checkbox("Hide picked RE4 UI elements", settings.hide_re4_ui)
-        draw_gui_picker()
+        changed, settings.send_input = imgui.checkbox("Send keys, mouse and look direction to Minecraft", settings.send_input)
+        changed, settings.hide_all_re4_ui = imgui.checkbox("Hide all RE4 UI while playing (F8 = show it)", settings.hide_all_re4_ui)
+        if not settings.hide_all_re4_ui then
+            changed, settings.hide_re4_ui = imgui.checkbox("Hide picked RE4 UI elements", settings.hide_re4_ui)
+            draw_gui_picker()
+        end
         imgui.text(is_connected() and "Minecraft: connected" or "Minecraft: not connected (showing Leon's health)")
         changed, settings.show_debug = imgui.checkbox("Show debug info", settings.show_debug)
         if settings.show_debug then

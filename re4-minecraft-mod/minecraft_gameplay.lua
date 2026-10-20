@@ -80,6 +80,8 @@ local state = {
     last_attack_time = -10,
     last_attack_seq = nil,
     predicted_jump_time = nil,
+    floor_y = nil,          -- RE4's floor height under Leon while Minecraft's player is on its flat ground
+    smooth_y = nil,
     probe = nil,            -- movement recorder
     time = 0,
     frame_start_pos = nil,
@@ -264,14 +266,13 @@ local function move_leon(player, dx, dz, dy)
     return true
 end
 
--- Vertical speed: nil hands height back to RE4 (gravity and ground snapping on)
+-- Vertical speed: nil hands height back to RE4 (its gravity and ground snapping).
+-- While we control it, RE4's collision still stops Leon at floors and ceilings.
 local function set_vertical(player, vy)
     if vy == nil then
         if state.vy ~= nil then set_gravity(player, true) end
-    elseif vy > 0 then
-        set_gravity(player, false, false)   -- going up: nothing pulls Leon down
-    else
-        set_gravity(player, false, true)    -- coming down: let RE4 catch him on the ground
+    elseif state.vy == nil then
+        set_gravity(player, false)
     end
     state.vy = vy
 end
@@ -331,24 +332,46 @@ local function update_from_minecraft(player, dt)
         state.velocity = velocity
     end
 
-    -- Vertical: Minecraft's own vertical speed while its player is in the air. A jump press starts
-    -- a predicted jump right away; Minecraft's real jump takes over as soon as it arrives.
+    -- Vertical: Leon stays as high above RE4's floor as Minecraft's player is above its flat ground
+    -- (jumping, flying, standing on placed blocks). A jump press starts a predicted jump right away;
+    -- Minecraft's real height takes over as soon as it arrives.
+    local elevation = move.elevation or 0
     local mc_airborne = move.flying == true or move.on_ground == false
-    if keys.jump and state.vy == nil and state.predicted_jump_time == nil and not mc_airborne then
+    local mc_up = mc_airborne or elevation > 0.01
+    local base = state.auth_pos or state.frame_start_pos
+
+    if keys.jump and state.vy == nil and state.predicted_jump_time == nil and not mc_up then
         state.predicted_jump_time = state.time
     end
-    if state.predicted_jump_time ~= nil and (mc_airborne or state.time - state.predicted_jump_time > JUMP_PREDICT_SECONDS) then
+    if state.predicted_jump_time ~= nil and (mc_up or state.time - state.predicted_jump_time > JUMP_PREDICT_SECONDS) then
         state.predicted_jump_time = nil
     end
 
-    local vy = nil
-    if state.predicted_jump_time ~= nil then
+    if not mc_up and state.predicted_jump_time == nil and state.vy == nil and base ~= nil then
+        state.floor_y = base.y
+    end
+    if state.floor_y == nil and base ~= nil then
+        state.floor_y = base.y - elevation
+    end
+
+    local target = nil
+    if state.predicted_jump_time ~= nil and state.floor_y ~= nil then
         local t = state.time - state.predicted_jump_time
-        vy = MC.jump_velocity - MC.gravity * t
-    elseif mc_airborne then
-        vy = (move.up or 0) * TICKS_PER_SECOND
-        -- Falling and RE4 says Leon already stands on something: he has landed
-        if vy <= 0 and not move.flying and is_on_ground(player) then vy = nil end
+        target = state.floor_y + math.max(0, MC.jump_velocity * t - 0.5 * MC.gravity * t * t)
+        state.smooth_y = target
+    elseif mc_up and state.floor_y ~= nil and base ~= nil then
+        -- Minecraft updates 20 times per second; ease toward its height so it looks smooth
+        local goal = state.floor_y + elevation
+        local from = state.smooth_y or base.y
+        state.smooth_y = from + (goal - from) * math.min(1, 20 * dt)
+        target = state.smooth_y
+    else
+        state.smooth_y = nil
+    end
+
+    local vy = nil
+    if target ~= nil and base ~= nil then
+        vy = math.max(-40, math.min(40, (target - base.y) / dt))
     end
     set_vertical(player, vy)
 
