@@ -204,8 +204,9 @@ public final class Re4Native {
      * Called by ModelPartMixin instead of drawing a part's cuboids. Returns true when RE4 shows this part itself
      * (then Minecraft doesn't draw it).
      */
-    public static boolean onPartCompile(ModelPart part, PoseStack.Pose pose, VertexConsumer consumer, List<ModelPart.Cube> cubes) {
-        if (currentEntity == null || frameOffset == null || cubes.isEmpty() || !(consumer instanceof Tagged tagged)) {
+    public static boolean onPartCompile(ModelPart part, PoseStack.Pose pose, VertexConsumer consumer, List<ModelPart.Cube> cubes, int color) {
+        // Tinted parts (dyed wool, leather armor) keep Minecraft's drawing: the RE4 copy has no tint
+        if (currentEntity == null || frameOffset == null || cubes.isEmpty() || color != -1 || !(consumer instanceof Tagged tagged)) {
             return false;
         }
         String texture = tagged.texture();
@@ -268,8 +269,8 @@ public final class Re4Native {
         float[] positions = geometry.positions();
         float[] normals = geometry.normals();
         float[] uvs = geometry.uvs();
-        String meshName = "m_" + hash(positions, uvs);
-        String texName = "t_" + hashString(texture);
+        String meshName = "m_" + hash(positions, uvs) + "_r" + Re4NativeFiles.FORMAT_REV;
+        String texName = "t_" + hashString(texture) + "_r" + Re4NativeFiles.FORMAT_REV;
         String key = meshName + "|" + texName;
         Export existing = byFiles.get(key);
         if (existing != null) {
@@ -586,9 +587,9 @@ public final class Re4Native {
 
         private static String textureOf(RenderType renderType) {
             String s = renderType.toString();
-            // Only the plain entity render types (solid, cutout, translucent): not glints, outlines, eyes, energy
-            if (!s.startsWith("RenderType[entity_solid") && !s.startsWith("RenderType[entity_cutout")
-                    && !s.startsWith("RenderType[entity_translucent:") && !s.startsWith("RenderType[entity_translucent_cull")) {
+            // Only the plain opaque entity render types (solid, cutout): see-through layers (slime jelly), glints,
+            // outlines, glowing eyes and energy swirls keep Minecraft's drawing
+            if (!s.startsWith("RenderType[entity_solid") && !s.startsWith("RenderType[entity_cutout")) {
                 return null;
             }
             Matcher m = TEXTURE.matcher(s);

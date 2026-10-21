@@ -25,7 +25,7 @@ public abstract class ModelPartMixin {
     @Redirect(method = "render(Lcom/mojang/blaze3d/vertex/PoseStack;Lcom/mojang/blaze3d/vertex/VertexConsumer;III)V",
             at = @At(value = "INVOKE", target = "Lnet/minecraft/client/model/geom/ModelPart;compile(Lcom/mojang/blaze3d/vertex/PoseStack$Pose;Lcom/mojang/blaze3d/vertex/VertexConsumer;III)V"))
     private void re4bridge$compile(ModelPart self, PoseStack.Pose pose, VertexConsumer consumer, int light, int overlay, int color) {
-        if (!Re4Native.onPartCompile(self, pose, consumer, this.cubes)) {
+        if (!Re4Native.onPartCompile(self, pose, consumer, this.cubes, color)) {
             this.compile(pose, consumer, light, overlay, color);
         }
     }

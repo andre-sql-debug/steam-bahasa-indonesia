@@ -7,6 +7,8 @@ final class Re4NativeFiles {
     static final String MESH_VERSION = "221108797";
     static final String TEX_VERSION = "143221013";
     static final String MDF_VERSION = "32";
+    // Part of every file name: a corrected writer makes new names, so RE4 never keeps an old copy cached
+    static final int FORMAT_REV = 1;
 
     private Re4NativeFiles() {
     }
