@@ -1387,7 +1387,7 @@ write_report = function()
     json.dump_file(REPORT_FILE, report)
 end
 
-re.on_draw_ui(function()
+local function draw_ui()
     if not imgui.tree_node("Minecraft Diagnostics") then return end
     imgui.text("Writes reframework\\data\\" .. REPORT_FILE .. " (also by itself after a minute of play).")
     if imgui.button("Save report now") then report_now = true end
@@ -1443,4 +1443,12 @@ re.on_draw_ui(function()
 
     for _, l in ipairs(log_lines) do imgui.text(l) end
     imgui.tree_pop()
+end
+
+-- Drawn inside the one Minecraft menu (minecraft_menu.lua), or on its own
+MinecraftRE4Menu = MinecraftRE4Menu or { sections = {}, settings = {} }
+MinecraftRE4Menu.sections.diagnostics = { order = 90, draw = draw_ui }
+MinecraftRE4Menu.save_report = function() report_now = true end
+re.on_draw_ui(function()
+    if not MinecraftRE4Menu.present then draw_ui() end
 end)

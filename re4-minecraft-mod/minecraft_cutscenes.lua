@@ -217,7 +217,7 @@ re.on_frame(function()
     debug.status = "on (" .. tostring(control.reason) .. ")"
 end)
 
-re.on_draw_ui(function()
+local function draw_ui()
     if imgui.tree_node("Minecraft Cutscenes") then
         local changed
         changed, settings.enabled = imgui.checkbox("Your Minecraft character plays Leon in cutscenes", settings.enabled)
@@ -230,6 +230,14 @@ re.on_draw_ui(function()
         end
         imgui.tree_pop()
     end
+end
+
+-- Drawn inside the one Minecraft menu (minecraft_menu.lua, which also saves the settings), or on its own
+MinecraftRE4Menu = MinecraftRE4Menu or { sections = {}, settings = {} }
+MinecraftRE4Menu.sections.cutscenes = { order = 60, draw = draw_ui }
+MinecraftRE4Menu.settings.cutscenes = settings
+re.on_draw_ui(function()
+    if not MinecraftRE4Menu.present then draw_ui() end
 end)
 
 re.on_script_reset(function()

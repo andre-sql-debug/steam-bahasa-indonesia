@@ -299,7 +299,7 @@ re.on_script_reset(function()
     pcall(json.dump_file, STATUS_FILE, { enabled = false, acked = {}, frame = state.frame })
 end)
 
-re.on_draw_ui(function()
+local function draw_ui()
     if not imgui.tree_node("Minecraft Real Mobs") then return end
     local changed
     changed, settings.enabled = imgui.checkbox("Real RE4 mobs (experimental)", settings.enabled)
@@ -316,4 +316,12 @@ re.on_draw_ui(function()
         for _, e in ipairs(debug.errors) do imgui.text("  " .. e) end
     end
     imgui.tree_pop()
+end
+
+-- Drawn inside the one Minecraft menu (minecraft_menu.lua, which also saves the settings), or on its own
+MinecraftRE4Menu = MinecraftRE4Menu or { sections = {}, settings = {} }
+MinecraftRE4Menu.sections.native = { order = 50, draw = draw_ui }
+MinecraftRE4Menu.settings.native = settings
+re.on_draw_ui(function()
+    if not MinecraftRE4Menu.present then draw_ui() end
 end)

@@ -1505,7 +1505,7 @@ re.on_pre_application_entry("UpdatePhysicsCharacterController", function()
     if settings.combat and mouse_clicked() then builtin_attack() end
 end)
 
-re.on_draw_ui(function()
+local function draw_ui()
     if imgui.tree_node("Minecraft Gameplay") then
         local changed
         changed, settings.movement = imgui.checkbox("Minecraft movement", settings.movement)
@@ -1533,6 +1533,14 @@ re.on_draw_ui(function()
         end
         imgui.tree_pop()
     end
+end
+
+-- Drawn inside the one Minecraft menu (minecraft_menu.lua, which also saves the settings), or on its own
+MinecraftRE4Menu = MinecraftRE4Menu or { sections = {}, settings = {} }
+MinecraftRE4Menu.sections.gameplay = { order = 10, draw = draw_ui }
+MinecraftRE4Menu.settings.gameplay = settings
+re.on_draw_ui(function()
+    if not MinecraftRE4Menu.present then draw_ui() end
 end)
 
 re.on_script_reset(function()

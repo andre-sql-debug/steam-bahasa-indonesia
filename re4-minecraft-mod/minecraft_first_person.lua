@@ -552,7 +552,7 @@ re.on_frame(function()
     draw.filled_rect(cx - px / 2, cy - arm, px, arm * 2, 0xFFFFFFFF)
 end)
 
-re.on_draw_ui(function()
+local function draw_ui()
     if imgui.tree_node("Minecraft First Person") then
         local changed
         changed, settings.first_person = imgui.checkbox("Minecraft camera on (F5 without Minecraft)", settings.first_person)
@@ -581,6 +581,14 @@ re.on_draw_ui(function()
         end
         imgui.tree_pop()
     end
+end
+
+-- Drawn inside the one Minecraft menu (minecraft_menu.lua, which also saves the settings), or on its own
+MinecraftRE4Menu = MinecraftRE4Menu or { sections = {}, settings = {} }
+MinecraftRE4Menu.sections.first_person = { order = 20, draw = draw_ui }
+MinecraftRE4Menu.settings.first_person = settings
+re.on_draw_ui(function()
+    if not MinecraftRE4Menu.present then draw_ui() end
 end)
 
 re.on_script_reset(function()

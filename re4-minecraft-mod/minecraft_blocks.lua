@@ -325,7 +325,7 @@ re.on_frame(function()
     draw_target()
 end)
 
-re.on_draw_ui(function()
+local function draw_ui()
     if imgui.tree_node("Minecraft Blocks") then
         local changed
         changed, settings.enabled = imgui.checkbox("Show Minecraft blocks", settings.enabled)
@@ -345,4 +345,12 @@ re.on_draw_ui(function()
         end
         imgui.tree_pop()
     end
+end
+
+-- Drawn inside the one Minecraft menu (minecraft_menu.lua, which also saves the settings), or on its own
+MinecraftRE4Menu = MinecraftRE4Menu or { sections = {}, settings = {} }
+MinecraftRE4Menu.sections.blocks = { order = 40, draw = draw_ui }
+MinecraftRE4Menu.settings.blocks = settings
+re.on_draw_ui(function()
+    if not MinecraftRE4Menu.present then draw_ui() end
 end)

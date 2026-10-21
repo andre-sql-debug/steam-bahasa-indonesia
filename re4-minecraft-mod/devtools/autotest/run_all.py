@@ -33,6 +33,7 @@ LUA_SUITES = [
      r"FAILS (\d+)"),
     ("lua: enemies look at mobs", [os.path.join(HERE, "lua", "attention", "harness.py"), os.path.join(REPO, "minecraft_gameplay.lua")],
      r"\d+ passed, (\d+) failed"),
+    ("lua: one Minecraft menu, saved settings", [os.path.join(HERE, "lua", "menu", "harness.py"), REPO], r"FAILS (\d+)"),
 ]
 
 
@@ -74,7 +75,14 @@ def main():
                 results.append({"name": "minecraft starts", "passed": started, "details": {}})
                 if started:
                     re4 = FakeRE4(DATA, [os.path.join(REPO, "minecraft_control.lua"), os.path.join(REPO, "minecraft_terrain.lua")])
-                    re4.run_for(10.0)   # Minecraft connects, anchors, gets RE4's terrain
+                    # Minecraft connects, anchors, gets RE4's terrain and takes commands (not a fixed time: it varies)
+                    ready_by = time.time() + 60.0
+                    while time.time() < ready_by:
+                        re4.run_for(1.0)
+                        b = re4.bridge()
+                        if b.get("in_world") and b.get("overlay") and (b.get("terrain_boxes") or 0) > 0 and b.get("authority"):
+                            break
+                    re4.run_for(3.0)
                     for sc in scenarios.ALL:
                         if only and sc.__name__ not in only:
                             continue

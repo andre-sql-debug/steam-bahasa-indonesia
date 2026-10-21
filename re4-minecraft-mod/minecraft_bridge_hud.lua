@@ -852,8 +852,6 @@ local function update_input()
         input.re4_keys = re4_moves
         changed = true
     end
-    -- A Minecraft screen is open and gets RE4's keys and mouse (through the overlay plugin): tell the other
-    -- scripts, and send no movement or clicks of our own
     -- RE4's hits on Leon (total RE4 damage so far, Leon's max health) and whether RE4 killed Leon
     local c = MinecraftRE4Control
     if type(c) == "table" and type(c.leon_damage) == "table" then
@@ -867,6 +865,14 @@ local function update_input()
             changed = true
         end
     end
+    -- The menu's "Make support zip" button (the Minecraft mod makes the zip)
+    local m = MinecraftRE4Menu
+    if type(m) == "table" and type(m.report_request) == "number" and input.report_request ~= m.report_request then
+        input.report_request = m.report_request
+        changed = true
+    end
+    -- A Minecraft screen is open and gets RE4's keys and mouse (through the overlay plugin): tell the other
+    -- scripts, and send no movement or clicks of our own
     read_plugin_mouse()
     local minecraft_screen = data ~= nil and data.screen_open == true and not turn and plugin_mouse_alive()
     if type(MinecraftRE4Control) == "table" then MinecraftRE4Control.minecraft_screen = minecraft_screen end
@@ -1175,7 +1181,7 @@ re.on_frame(function()
     draw_hunger(x0 + 182 * px, h - 39 * px, px, data.food or 0)
 end)
 
-re.on_draw_ui(function()
+local function draw_ui()
     if imgui.tree_node("Minecraft HUD") then
         local changed
         changed, settings.enabled = imgui.checkbox("Enabled", settings.enabled)
@@ -1216,4 +1222,12 @@ re.on_draw_ui(function()
         end
         imgui.tree_pop()
     end
+end
+
+-- Drawn inside the one Minecraft menu (minecraft_menu.lua, which also saves the settings), or on its own
+MinecraftRE4Menu = MinecraftRE4Menu or { sections = {}, settings = {} }
+MinecraftRE4Menu.sections.hud = { order = 30, draw = draw_ui }
+MinecraftRE4Menu.settings.hud = settings
+re.on_draw_ui(function()
+    if not MinecraftRE4Menu.present then draw_ui() end
 end)

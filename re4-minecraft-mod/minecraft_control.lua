@@ -179,7 +179,7 @@ re.on_pre_application_entry("UpdateBehavior", function()
     control.reason = reason
 end)
 
-re.on_draw_ui(function()
+local function draw_ui()
     if imgui.tree_node("Minecraft Control") then
         local changed
         changed, settings.auto = imgui.checkbox("Give Leon to RE4 for ladders, doors, cutscenes, grabs...", settings.auto)
@@ -196,4 +196,12 @@ re.on_draw_ui(function()
         end
         imgui.tree_pop()
     end
+end
+
+-- Drawn inside the one Minecraft menu (minecraft_menu.lua, which also saves the settings), or on its own
+MinecraftRE4Menu = MinecraftRE4Menu or { sections = {}, settings = {} }
+MinecraftRE4Menu.sections.control = { order = 80, draw = draw_ui }
+MinecraftRE4Menu.settings.control = settings
+re.on_draw_ui(function()
+    if not MinecraftRE4Menu.present then draw_ui() end
 end)

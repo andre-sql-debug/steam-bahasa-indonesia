@@ -197,4 +197,38 @@ def re4_stopped(re4, mc):
     return result("re4_stopped", ok, y_before=y_before, moved_to_spawn=moved, died=dead, y_after_reconnect=y_after)
 
 
-ALL = [lockstep_camera, golem_fight, native_handoff, leon_damage, re4_stopped]
+def support_zip(re4, mc):
+    """The menu's "Make support zip": Minecraft zips its log and RE4's files, and says where the zip is."""
+    import zipfile
+    re4.write_json("minecraft_settings.json", {"gameplay": {"flinch": True}})
+    re4.run_for(1.0)
+    request = int(time.time())
+    re4.input["report_request"] = request
+    report, deadline = None, time.time() + 20.0
+    while time.time() < deadline:
+        re4.run_for(0.5)
+        r = re4.bridge().get("report") or {}
+        if r.get("seq") == request and r.get("busy") is False:
+            report = r
+            break
+    if report is None or not report.get("path"):
+        return result("support_zip", False, report=report)
+    with zipfile.ZipFile(report["path"]) as z:
+        names = z.namelist()
+        summary = z.read("summary.txt").decode("utf-8", "replace") if "summary.txt" in names else ""
+    # the same request again is not a new one
+    re4.run_for(2.0)
+    again = (re4.bridge().get("report") or {}).get("path") == report["path"]
+    try:
+        import os
+        os.remove(report["path"])
+    except OSError:
+        pass
+    wanted = ["summary.txt", "minecraft/latest.log", "installed_files.txt", "re4/reframework/data/minecraft_settings.json",
+              "re4/reframework/data/minecraft_bridge.json"]
+    ok = all(n in names for n in wanted) and "RE4 Bridge mod" in summary and again
+    return result("support_zip", ok, entries=len(names), missing=[n for n in wanted if n not in names],
+                  same_request_ignored=again, summary=summary.splitlines()[:3])
+
+
+ALL = [lockstep_camera, golem_fight, native_handoff, leon_damage, re4_stopped, support_zip]

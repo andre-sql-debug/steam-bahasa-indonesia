@@ -202,6 +202,7 @@ public class Re4Bridge implements ClientModInitializer {
         Re4Puppet.init(outputFile.resolveSibling("minecraft_puppet.json"));
         Re4Input.init(outputFile.resolveSibling("minecraft_mouse.json"));
         Re4Native.init(outputFile);
+        Re4Report.init(outputFile);
         LOGGER.info("RE4 Bridge: writing HUD data to {}, reading input from {}", outputFile, inputFile);
     }
 
@@ -391,6 +392,7 @@ public class Re4Bridge implements ClientModInitializer {
         ticks++;
         Re4Native.readStatus();   // real RE4 mobs: switched on from RE4, and which parts RE4 has
         holdWhenRe4Gone(mc);
+        Re4Report.tick(mc);       // the support zip, when RE4's menu asks for one
 
         try {
             if (mc.player != null) {
@@ -884,6 +886,7 @@ public class Re4Bridge implements ClientModInitializer {
         LocalPlayer player = mc.player;
         state.addProperty("in_world", player != null);
         state.addProperty("dead", player != null && player.isDeadOrDying());
+        state.add("report", Re4Report.status());
         if (player == null) {
             return state;
         }

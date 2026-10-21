@@ -602,7 +602,7 @@ re.on_frame(function()
     end
 end)
 
-re.on_draw_ui(function()
+local function draw_ui()
     if imgui.tree_node("Minecraft Terrain") then
         local changed
         changed, settings.enabled = imgui.checkbox("Minecraft physics on RE4 terrain", settings.enabled)
@@ -622,6 +622,14 @@ re.on_draw_ui(function()
         end
         imgui.tree_pop()
     end
+end
+
+-- Drawn inside the one Minecraft menu (minecraft_menu.lua, which also saves the settings), or on its own
+MinecraftRE4Menu = MinecraftRE4Menu or { sections = {}, settings = {} }
+MinecraftRE4Menu.sections.terrain = { order = 70, draw = draw_ui }
+MinecraftRE4Menu.settings.terrain = settings
+re.on_draw_ui(function()
+    if not MinecraftRE4Menu.present then draw_ui() end
 end)
 
 re.on_script_reset(function()

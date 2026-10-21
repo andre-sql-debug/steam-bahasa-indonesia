@@ -101,7 +101,17 @@ gets the movement keys.
 Requirements: RE4 Remake on PC (Steam) and [REFramework](https://github.com/praydog/REFramework-nightly/releases)
 (`REFramework.zip` → `dinput8.dll` in the game folder).
 
-Copy the `.lua` files into `<RE4 game folder>\reframework\autorun\`. Settings: press **Insert** → **Script Generated UI**.
+Copy the `.lua` files into `<RE4 game folder>\reframework\autorun\`. Settings: press **Insert** → **Script Generated UI**
+→ **Minecraft**.
+
+- `minecraft_menu.lua`: the one **Minecraft** menu. On top: whether Minecraft is connected and who has Leon,
+  the most used switches (hearts, shared death, flinching, real RE4 mobs, camera, cutscenes, RE4's HUD),
+  **Save diagnostics report**, **Make support zip** and **Reset all settings to defaults**; below it every
+  script's own section. Settings are saved by themselves in `reframework\data\minecraft_settings.json` and
+  come back the next time RE4 starts. **Make support zip** saves the diagnostics report, then the Minecraft
+  mod puts Minecraft's log, the mod's files in `reframework\data`, REFramework's log and settings, and lists
+  of the installed scripts, plugins, mob files and Minecraft mods into one zip on the Desktop (the menu shows
+  where): send that one file when reporting a problem.
 
 - `minecraft_bridge_hud.lua`: Minecraft HUD (hotbar, hearts, hunger, XP, held item) from live Minecraft data.
   In RE4, **1-9** pick the Minecraft hotbar slot and **left-click** swings the held item (in RE4 and Minecraft).
