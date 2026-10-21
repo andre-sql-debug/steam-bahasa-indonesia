@@ -18,8 +18,13 @@
 //  24  u64 frame counter   32  u32 input to RE4: 0 = none of Minecraft's (mouse + movement keys stay
 //      with Minecraft), 1 = movement keys (RE4 moves Leon: ladders, the boat), 2 = everything (a cutscene
 //      where your Minecraft character plays Leon)   36  u32 a Minecraft screen is open (inventory,
-//      creative menu, chat...): Minecraft gets all keys and the mouse   40..63 reserved
-//  64  slot 0, then slot 1: width*height RGBA8 pixels each, bottom row first (OpenGL order),
+//      creative menu, chat...): Minecraft gets all keys and the mouse
+//  RE4's camera, written by this plugin every frame (Minecraft draws from exactly this camera):
+//  40  u32 camera valid   44  f32 vertical field of view (degrees)   48  u64 camera number (RE4 frame,
+//      written last)   56/64/72  f64 position x/y/z   80/84/88  f32 forward direction x/y/z
+//  96  u64 camera number slot 0 was drawn with   104  u64 same for slot 1 (written by Minecraft)
+//  112..255 reserved
+//  256 slot 0, then slot 1: width*height RGBA8 pixels each, bottom row first (OpenGL order),
 //      each slot sized for the maximum 1920x1080
 //
 // Build: see build.sh (MinGW-w64 cross compiler, no Visual Studio needed).
@@ -29,6 +34,8 @@
 #include <dxgi1_4.h>
 #include <d3dcompiler.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -41,7 +48,8 @@ namespace {
 constexpr uint32_t MAGIC = 0x434D3452;   // 'R4MC'
 constexpr uint32_t MAX_WIDTH = 1920;
 constexpr uint32_t MAX_HEIGHT = 1080;
-constexpr size_t HEADER_SIZE = 64;
+constexpr uint32_t VERSION = 2;
+constexpr size_t HEADER_SIZE = 256;
 constexpr size_t SLOT_SIZE = size_t(MAX_WIDTH) * MAX_HEIGHT * 4;
 constexpr size_t FILE_SIZE = HEADER_SIZE + 2 * SLOT_SIZE;
 constexpr uint32_t MAX_BACKBUFFERS = 8;
@@ -80,7 +88,7 @@ std::wstring data_folder() {
 struct SharedFrame {
     HANDLE file = INVALID_HANDLE_VALUE;
     HANDLE mapping = nullptr;
-    const uint8_t* view = nullptr;
+    uint8_t* view = nullptr;
     DWORD next_try = 0;
 
     bool open() {
@@ -90,7 +98,7 @@ struct SharedFrame {
         next_try = now + 2000;
 
         std::wstring path = data_folder() + L"minecraft_overlay.bin";
-        file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        file = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (file == INVALID_HANDLE_VALUE) return false;
         LARGE_INTEGER size{};
@@ -98,12 +106,12 @@ struct SharedFrame {
             close();
             return false;
         }
-        mapping = CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
+        mapping = CreateFileMappingW(file, nullptr, PAGE_READWRITE, 0, 0, nullptr);
         if (mapping == nullptr) {
             close();
             return false;
         }
-        view = (const uint8_t*)MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, FILE_SIZE);
+        view = (uint8_t*)MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, FILE_SIZE);
         if (view == nullptr) {
             close();
             return false;
@@ -123,6 +131,10 @@ struct SharedFrame {
 
     uint32_t u32(size_t offset) const { return *(volatile const uint32_t*)(view + offset); }
     uint64_t u64(size_t offset) const { return *(volatile const uint64_t*)(view + offset); }
+    void put_u32(size_t offset, uint32_t v) { *(volatile uint32_t*)(view + offset) = v; }
+    void put_f32(size_t offset, float v) { *(volatile float*)(view + offset) = v; }
+    void put_f64(size_t offset, double v) { *(volatile double*)(view + offset) = v; }
+    void put_u64(size_t offset, uint64_t v) { *(volatile uint64_t*)(view + offset) = v; }
 };
 
 SharedFrame g_shared;
@@ -135,6 +147,11 @@ volatile LONG g_minecraft_active = 0;
 volatile LONG g_input_to_re4 = 0;
 // True while a Minecraft screen (inventory, chat...) is open: all input goes to Minecraft
 volatile LONG g_minecraft_screen = 0;
+// Number of the RE4 camera written this frame (0 = none); the picture shown must be drawn with it
+// (written on the game thread, read on the render thread)
+volatile LONG64 g_camera_seq = 0;      // only ever counts up
+volatile LONG g_camera_this_frame = 0;  // 0: RE4's camera couldn't be read this frame, nothing to wait for
+constexpr double LOCKSTEP_MAX_WAIT_MS = 12.0;
 
 // ---------------------------------------------------------------------------------------------
 // D3D12 drawing
@@ -481,6 +498,46 @@ struct Renderer {
         list->ResourceBarrier(1, &b);
     }
 
+    // Minecraft draws from RE4's camera of this frame (written at BeginRendering); give it a few
+    // milliseconds to finish that picture, so Minecraft's things stay exactly in place while you turn. If
+    // it keeps missing (a slow PC), stop waiting for a while instead of slowing RE4 down; each pause in a
+    // row lasts twice as long (up to a minute), and a long run of matches makes it start over.
+    int lockstep_misses = 0;
+    int lockstep_hits = 0;
+    DWORD lockstep_paused_until = 0;
+    DWORD lockstep_pause_ms = 5000;
+
+    void wait_for_matching_picture(const SharedFrame& s) {
+        uint64_t wanted = (uint64_t)InterlockedCompareExchange64(&g_camera_seq, 0, 0);
+        if (!g_camera_this_frame || wanted == 0 || GetTickCount() < lockstep_paused_until) return;
+        // Only while Minecraft is delivering pictures (not minimized, frozen or between worlds)
+        if (last_frame == 0 || GetTickCount() - last_frame_time > 250) return;
+        LARGE_INTEGER freq, start, now;
+        QueryPerformanceFrequency(&freq);
+        QueryPerformanceCounter(&start);
+        for (;;) {
+            UINT slot = s.u32(16) & 1;
+            if (s.u64(96 + slot * 8) >= wanted) {
+                lockstep_misses = 0;
+                if (++lockstep_hits >= 600) lockstep_pause_ms = 5000;
+                return;
+            }
+            QueryPerformanceCounter(&now);
+            double waited_ms = double(now.QuadPart - start.QuadPart) * 1000.0 / double(freq.QuadPart);
+            if (waited_ms > LOCKSTEP_MAX_WAIT_MS) break;
+            YieldProcessor();
+            if (waited_ms > 1.0) Sleep(0);
+        }
+        lockstep_hits = 0;
+        if (++lockstep_misses >= 30) {
+            lockstep_misses = 0;
+            lockstep_paused_until = GetTickCount() + lockstep_pause_ms;
+            log_info(("Minecraft can't keep up with RE4's frame rate; not waiting for it for " +
+                      std::to_string(lockstep_pause_ms / 1000) + " s").c_str());
+            lockstep_pause_ms = std::min<DWORD>(lockstep_pause_ms * 2, 60000);
+        }
+    }
+
     void frame() {
         if (failed) {
             release_input();
@@ -496,10 +553,11 @@ struct Renderer {
         if (!g_shared.open()) return;
 
         const SharedFrame& s = g_shared;
-        if (s.u32(0) != MAGIC || s.u32(20) == 0) {   // Minecraft isn't streaming
+        if (s.u32(0) != MAGIC || s.u32(4) != VERSION || s.u32(20) == 0) {   // Minecraft isn't streaming
             InterlockedExchange(&g_minecraft_active, 0);
             return;
         }
+        wait_for_matching_picture(s);
         uint64_t counter = s.u64(24);
         DWORD now = GetTickCount();
         bool new_frame = counter != last_frame;
@@ -879,6 +937,104 @@ void write_status() {
     fclose(f);
 }
 
+// ---------------------------------------------------------------------------------------------
+// RE4's camera for Minecraft, read right before RE4 renders the frame
+// ---------------------------------------------------------------------------------------------
+
+
+#pragma pack(push, 1)
+struct InvokeResult {
+    uint8_t bytes[128];
+    bool exception_thrown;
+};
+#pragma pack(pop)
+
+struct CameraReader {
+    bool looked_up = false;
+    REFrameworkMethodHandle main_view = nullptr, primary_camera = nullptr, game_object = nullptr, transform = nullptr,
+                            position = nullptr, axis_z = nullptr, fov = nullptr, vertical = nullptr;
+
+    void look_up() {
+        looked_up = true;
+        auto tdb = g_param->sdk->functions->get_tdb();
+        auto find = g_param->sdk->tdb->find_method;
+        main_view = find(tdb, "via.SceneManager", "get_MainView");
+        primary_camera = find(tdb, "via.SceneView", "get_PrimaryCamera");
+        game_object = find(tdb, "via.Component", "get_GameObject");
+        transform = find(tdb, "via.GameObject", "get_Transform");
+        position = find(tdb, "via.Transform", "get_Position");
+        axis_z = find(tdb, "via.Transform", "get_AxisZ");
+        fov = find(tdb, "via.Camera", "get_FOV");
+        vertical = find(tdb, "via.Camera", "get_VerticalEnable");
+        if (!main_view || !primary_camera || !game_object || !transform || !position || !axis_z || !fov) {
+            log_error("RE4's camera methods were not found; Minecraft follows the scripts' camera instead");
+        }
+    }
+
+    bool call(REFrameworkMethodHandle m, void* self, InvokeResult& out) {
+        if (m == nullptr || self == nullptr) return false;
+        memset(&out, 0, sizeof(out));
+        return g_param->sdk->method->invoke(m, self, nullptr, 0, &out, sizeof(out)) == REFRAMEWORK_ERROR_NONE &&
+               !out.exception_thrown;
+    }
+
+    void* ptr(const InvokeResult& r) { void* p; memcpy(&p, r.bytes, sizeof(p)); return p; }
+    float f32(const InvokeResult& r, int i) { float v; memcpy(&v, r.bytes + i * 4, 4); return v; }
+
+    // Writes the camera into the shared header; false when it can't be read (menus, loading)
+    bool read_into(SharedFrame& s, float aspect) {
+        if (!looked_up) look_up();
+        void* scene_manager = g_param->sdk->functions->get_native_singleton("via.SceneManager");
+        InvokeResult r{};
+        if (!call(main_view, scene_manager, r)) return false;
+        void* view = ptr(r);
+        if (!call(primary_camera, view, r)) return false;
+        void* camera = ptr(r);
+        if (!call(game_object, camera, r)) return false;
+        void* object = ptr(r);
+        if (!call(transform, object, r)) return false;
+        void* tr = ptr(r);
+        if (!call(position, tr, r)) return false;
+        float px = f32(r, 0), py = f32(r, 1), pz = f32(r, 2);
+        if (!call(axis_z, tr, r)) return false;
+        // The camera looks along its -Z axis
+        float fx = -f32(r, 0), fy = -f32(r, 1), fz = -f32(r, 2);
+        if (!call(fov, camera, r)) return false;
+        float degrees = f32(r, 0);
+        bool is_vertical = call(vertical, camera, r) && r.bytes[0] != 0;
+        if (!is_vertical && aspect > 0.1f) {
+            const double rad = 3.14159265358979 / 180.0;
+            degrees = float(2.0 * atan(tan(degrees * rad / 2.0) / aspect) / rad);
+        }
+        float length = sqrtf(fx * fx + fy * fy + fz * fz);
+        if (!(length > 0.5f && length < 2.0f) || !(degrees > 1.0f && degrees < 170.0f)) return false;
+        s.put_f64(56, px);
+        s.put_f64(64, py);
+        s.put_f64(72, pz);
+        s.put_f32(80, fx / length);
+        s.put_f32(84, fy / length);
+        s.put_f32(88, fz / length);
+        s.put_f32(44, degrees);
+        s.put_u32(40, 1);
+        MemoryBarrier();
+        uint64_t seq = (uint64_t)InterlockedIncrement64(&g_camera_seq);
+        s.put_u64(48, seq);
+        InterlockedExchange(&g_camera_this_frame, 1);
+        return true;
+    }
+};
+CameraReader g_camera_reader;
+
+void on_begin_rendering() {
+    // The render thread opens the shared file (frame()); until then there's nobody to send the camera to
+    if (g_shared.view == nullptr || g_shared.u32(0) != MAGIC || g_shared.u32(4) != VERSION) return;
+    float aspect = g_renderer.bb_height > 0 ? float(g_renderer.bb_width) / float(g_renderer.bb_height) : 16.0f / 9.0f;
+    if (!g_camera_reader.read_into(g_shared, aspect)) {
+        g_shared.put_u32(40, 0);
+        InterlockedExchange(&g_camera_this_frame, 0);   // nothing to wait for
+    }
+}
+
 void on_present() {
     ++g_present_count;
     g_renderer.frame();
@@ -906,6 +1062,7 @@ extern "C" __declspec(dllexport) bool reframework_plugin_initialize(const REFram
     g_param = param;
     param->functions->on_present(on_present);
     param->functions->on_device_reset(on_device_reset);
+    param->functions->on_pre_application_entry("BeginRendering", on_begin_rendering);
     param->functions->on_message((REFOnMessageCb)on_message);
     log_info("loaded");
     return true;

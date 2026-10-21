@@ -22,10 +22,17 @@ import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.client.renderer.LightTexture;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderBuffers;
+import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.block.BlockRenderDispatcher;
 import net.minecraft.client.renderer.entity.EntityRenderDispatcher;
 import net.minecraft.client.renderer.texture.OverlayTexture;
+import com.mojang.blaze3d.vertex.VertexConsumer;
 import net.minecraft.core.BlockPos;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.util.FastColor;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.entity.item.PrimedTnt;
 import net.minecraft.world.level.block.RenderShape;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.util.Mth;
@@ -55,6 +62,8 @@ public class LevelRendererMixin {
     @Shadow private ClientLevel level;
 
     private static final double RENDER_DISTANCE_SQR = 64.0 * 64.0;
+    private static final RenderType RE4BRIDGE_SHADOW = RenderType.entityShadow(ResourceLocation.withDefaultNamespace("textures/misc/shadow.png"));
+    private static final double SHADOW_MAX_DROP = 2.5;   // no shadow when the floor is farther below than this
 
     @Inject(method = "renderLevel", at = @At("HEAD"), cancellable = true)
     private void re4bridge$skipWorld(DeltaTracker deltaTracker, boolean renderBlockOutline, Camera camera,
@@ -103,6 +112,44 @@ public class LevelRendererMixin {
         RenderSystem.enableCull();
     }
 
+    // Minecraft's own shadows fall on Minecraft blocks only; on RE4's floor, draw the same soft round shadow
+    // on the floor below (mobs, your character, dropped items and lit TNT), so they stand on it
+    private void re4bridge$re4Shadow(Entity entity, double x, double y, double z, Vec3 cam, MultiBufferSource buffers) {
+        if (!(entity instanceof LivingEntity || entity instanceof ItemEntity || entity instanceof PrimedTnt)
+                || !Minecraft.getInstance().options.entityShadows().get()) {
+            return;
+        }
+        float radius = Mth.clamp(entity.getBbWidth() * 0.85F, 0.15F, 3.0F);
+        AABB column = new AABB(x - radius, y - SHADOW_MAX_DROP, z - radius, x + radius, y + 0.25, z + radius);
+        double floor = Double.NEGATIVE_INFINITY;
+        for (AABB box : Re4Terrain.boxesNear(column)) {
+            if (box.maxY <= y + 0.25 && box.minX <= x && box.maxX >= x && box.minZ <= z && box.maxZ >= z) {
+                floor = Math.max(floor, box.maxY);
+            }
+        }
+        if (floor == Double.NEGATIVE_INFINITY) {
+            return;
+        }
+        // Standing on a block you built: Minecraft's own shadow is on it already
+        BlockPos below = BlockPos.containing(x, y - 0.2, z);
+        if (y - floor > 0.05 && !this.level.getBlockState(below).isAir()) {
+            return;
+        }
+        float strength = (float) (0.5 * (1.0 - (y - floor) / SHADOW_MAX_DROP) * (1.0 - entity.distanceToSqr(cam) / RENDER_DISTANCE_SQR));
+        if (strength <= 0.02F) {
+            return;
+        }
+        int color = FastColor.ARGB32.color(Mth.floor(Math.min(1.0F, strength) * 255.0F), 255, 255, 255);
+        float x0 = (float) (x - radius - cam.x), x1 = (float) (x + radius - cam.x);
+        float z0 = (float) (z - radius - cam.z), z1 = (float) (z + radius - cam.z);
+        float fy = (float) (floor + 0.015 - cam.y);   // just above RE4's floor (its stand-in is sunk 0.02)
+        VertexConsumer consumer = buffers.getBuffer(RE4BRIDGE_SHADOW);
+        consumer.addVertex(x0, fy, z0).setColor(color).setUv(0.0F, 0.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(LightTexture.FULL_BRIGHT).setNormal(0.0F, 1.0F, 0.0F);
+        consumer.addVertex(x0, fy, z1).setColor(color).setUv(0.0F, 1.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(LightTexture.FULL_BRIGHT).setNormal(0.0F, 1.0F, 0.0F);
+        consumer.addVertex(x1, fy, z1).setColor(color).setUv(1.0F, 1.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(LightTexture.FULL_BRIGHT).setNormal(0.0F, 1.0F, 0.0F);
+        consumer.addVertex(x1, fy, z0).setColor(color).setUv(1.0F, 0.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(LightTexture.FULL_BRIGHT).setNormal(0.0F, 1.0F, 0.0F);
+    }
+
     // The same steps renderLevel takes for its entities, for the ones near the player
     private void re4bridge$renderEntities(DeltaTracker deltaTracker, Camera camera, Matrix4f frustumMatrix, LightTexture lightTexture) {
         Entity cameraEntity = camera.getEntity();
@@ -134,6 +181,7 @@ public class LevelRendererMixin {
             double z = Mth.lerp(partialTick, entity.zOld, entity.getZ()) - cam.z;
             float yaw = Mth.lerp(partialTick, entity.yRotO, entity.getYRot());
             this.entityRenderDispatcher.render(entity, x, y, z, yaw, partialTick, poseStack, buffers, LightTexture.FULL_BRIGHT);
+            re4bridge$re4Shadow(entity, x + cam.x, y + cam.y, z + cam.z, cam, buffers);
         }
         // The blocks you built (TNT, glass, chests...), with Minecraft's own models and textures
         BlockRenderDispatcher blockRenderer = Minecraft.getInstance().getBlockRenderer();

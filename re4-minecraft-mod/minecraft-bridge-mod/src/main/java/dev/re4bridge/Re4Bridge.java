@@ -138,7 +138,9 @@ public class Re4Bridge implements ClientModInitializer {
     private static GraphicsStatus savedGraphics = null;
     private static Integer savedGuiScale = null;
     private static Integer savedFramerate = null;
-    private static final int OVERLAY_FPS = 60;
+    private static Boolean savedVsync = null;
+    // No frame limit of Minecraft's own: Re4Camera draws one picture per RE4 frame (about 60 without RE4's camera)
+    private static final int OVERLAY_FPS = 260;
     private static Path pluginStatusFile;
     private static Path terrainFile;
     private static long lastTerrainSeq = -1;
@@ -200,7 +202,7 @@ public class Re4Bridge implements ClientModInitializer {
     public static void onFrameRendered(Minecraft mc) {
         if (overlayActive && (!re4Turn || Re4Puppet.active()) && mc.level != null) {
             try {
-                OverlayStreamer.capture(mc);
+                OverlayStreamer.capture(mc, Re4Camera.renderedSeq());
             } catch (Exception e) {
                 warnOnce("could not capture the frame", e);
             }
@@ -261,21 +263,26 @@ public class Re4Bridge implements ClientModInitializer {
         savedGraphics = mc.options.graphicsMode().get();
         mc.options.graphicsMode().set(GraphicsStatus.FAST);
 
-        // Drawing only a hand and a HUD is so cheap Minecraft would run at hundreds of FPS; RE4 needs 60
+        // Pictures are paced by RE4's frames (Re4Camera), not by Minecraft's limit or its window's vsync
         savedFramerate = mc.options.framerateLimit().get();
         mc.options.framerateLimit().set(OVERLAY_FPS);
+        savedVsync = mc.options.enableVsync().get();
+        mc.options.enableVsync().set(false);
+        mc.getWindow().updateVsync(false);
 
-        // Half of RE4's screen size with GUI scale 2 = Minecraft's normal look, scaled up sharply 2x
-        int width = 960;
-        int height = 540;
+        // RE4's own screen size (at most 1920x1080, same shape), so Minecraft's picture is as sharp as RE4's;
+        // automatic GUI scale gives Minecraft's normal look at that size
+        int width = 1920;
+        int height = 1080;
         JsonObject status = readJson(pluginStatusFile);
         if (status != null && status.has("width") && status.has("height")) {
             re4ScreenWidth = status.get("width").getAsInt();
-            int w = status.get("width").getAsInt() / 2;
-            int h = status.get("height").getAsInt() / 2;
-            if (w >= 320 && h >= 240 && w <= 1920 && h <= 1080) {
-                width = w;
-                height = h;
+            int w = status.get("width").getAsInt();
+            int h = status.get("height").getAsInt();
+            if (w >= 320 && h >= 240) {
+                double scale = Math.min(1.0, Math.min(1920.0 / w, 1080.0 / h));
+                width = (int) Math.floor(w * scale);
+                height = (int) Math.floor(h * scale);
             }
         }
         if (mc.getWindow().isFullscreen()) {
@@ -283,7 +290,7 @@ public class Re4Bridge implements ClientModInitializer {
         }
         GLFW.glfwSetWindowSize(mc.getWindow().getWindow(), width, height);
         savedGuiScale = mc.options.guiScale().get();
-        mc.options.guiScale().set(2);
+        mc.options.guiScale().set(0);
         mc.resizeDisplay();
         LOGGER.info("RE4 Bridge: overlay mode on ({}x{})", width, height);
     }
@@ -297,6 +304,10 @@ public class Re4Bridge implements ClientModInitializer {
         }
         if (savedFramerate != null) {
             mc.options.framerateLimit().set(savedFramerate);
+        }
+        if (savedVsync != null) {
+            mc.options.enableVsync().set(savedVsync);
+            mc.getWindow().updateVsync(savedVsync);
         }
         mc.resizeDisplay();
         LOGGER.info("RE4 Bridge: overlay mode off");
@@ -563,6 +574,11 @@ public class Re4Bridge implements ClientModInitializer {
                     }
                     syncDone = syncSeq;
                 }
+            }
+            // The RE4 spot the anchor matches, for drawing from RE4's camera (Re4Camera)
+            if (epoch != 0 && epoch == Re4Terrain.anchorEpoch() && terrain.has("anchor_re4")) {
+                JsonObject a = terrain.getAsJsonObject("anchor_re4");
+                Re4Terrain.setAnchorRe4(epoch, a.get("x").getAsDouble(), a.get("y").getAsDouble(), a.get("z").getAsDouble());
             }
             // RE4's enemies near Leon, for their Minecraft stand-ins
             if (control && epoch != 0 && epoch == Re4Terrain.anchorEpoch() && terrain.has("enemies")) {

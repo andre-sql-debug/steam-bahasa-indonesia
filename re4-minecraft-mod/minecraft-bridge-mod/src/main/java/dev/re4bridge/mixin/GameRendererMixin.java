@@ -1,6 +1,7 @@
 package dev.re4bridge.mixin;
 
 import dev.re4bridge.Re4Bridge;
+import dev.re4bridge.Re4Camera;
 import dev.re4bridge.Re4Input;
 import dev.re4bridge.Re4Puppet;
 import net.minecraft.client.Camera;
@@ -25,6 +26,7 @@ public class GameRendererMixin {
     private void re4bridge$readPuppet(CallbackInfo ci) {
         Re4Puppet.onRenderFrame(Minecraft.getInstance());
         Re4Input.onRenderFrame(Minecraft.getInstance());
+        Re4Camera.onRenderFrame(Minecraft.getInstance());
     }
 
     @Inject(method = "render", at = @At("TAIL"))
@@ -49,10 +51,13 @@ public class GameRendererMixin {
         if (!useFovSetting) {
             return;
         }
-        if (Re4Puppet.hasCamera()) {
+        if (!Re4Puppet.active()) {
+            Re4Bridge.worldFov = cir.getReturnValue();   // RE4's camera takes this (with sprint zoom)
+        }
+        if (Re4Camera.active()) {
+            cir.setReturnValue(Re4Camera.fov());
+        } else if (Re4Puppet.hasCamera()) {
             cir.setReturnValue(Re4Puppet.fov());
-        } else {
-            Re4Bridge.worldFov = cir.getReturnValue();
         }
     }
 }

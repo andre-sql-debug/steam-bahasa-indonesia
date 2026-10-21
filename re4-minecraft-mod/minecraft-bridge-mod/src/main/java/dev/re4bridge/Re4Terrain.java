@@ -55,6 +55,26 @@ public final class Re4Terrain {
     }
 
     /** A new anchor: the Minecraft position that matches Leon's position for this epoch. */
+    // Leon's position (RE4) that the anchor matches, from RE4's terrain messages
+    private static volatile long anchorRe4Epoch = 0;
+    private static volatile double anchorRe4X, anchorRe4Y, anchorRe4Z;
+
+    public static void setAnchorRe4(long epoch, double x, double y, double z) {
+        anchorRe4X = x;
+        anchorRe4Y = y;
+        anchorRe4Z = z;
+        anchorRe4Epoch = epoch;
+    }
+
+    /** An RE4 position in Minecraft's world, or null while the two worlds aren't lined up. */
+    public static Vec3 toMinecraft(double x, double y, double z) {
+        long epoch = anchorEpoch;
+        if (epoch == 0 || anchorRe4Epoch != epoch) {
+            return null;
+        }
+        return new Vec3(anchorX + (x - anchorRe4X), anchorY + (y - anchorRe4Y), anchorZ + (z - anchorRe4Z));
+    }
+
     public static void setAnchor(long epoch, double x, double y, double z) {
         anchorX = x;
         anchorY = y;

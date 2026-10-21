@@ -34,7 +34,12 @@ so iron golems, tamed wolves, TNT and your sword fight RE4's enemies with Minecr
 crit sparks, damage hearts, knockback, enchantments); the damage is applied to the real enemy, and a killing
 hit makes RE4 kill it properly (its own death call, so it falls and is gone). Melee reaches enemies right
 up close too. Damage is Minecraft's: a fist does 1, a diamond sword 7 (a normal enemy has a zombie's 20). Bows and crossbows (hold right-click) hit what the crosshair is on. Bosses get more health
-(up to the Wither's 300) than normal enemies (a zombie's 20).
+(up to the Wither's 300) than normal enemies (a zombie's 20). RE4's enemies fight back: a mob attacking one
+within its reach takes a blow (2 hearts) about once a second, so a golem wins fights but not forever.
+
+Minecraft's things sit in RE4's world: they are drawn from RE4's own camera of each frame (see below), so
+they stay exactly in place when you turn or move; RE4's floors and walls hide them like they hide anything
+in RE4; and mobs, your character, dropped items and lit TNT cast Minecraft's soft round shadow on RE4's floor.
 
 ```
 Minecraft 1.21.1 + RE4 Bridge mod  --writes-->  RE4\reframework\data\minecraft_bridge.json        --read by-->  minecraft_bridge_hud.lua
@@ -49,11 +54,18 @@ CurseForge profile with Minecraft 1.21.1 + Fabric. Close Minecraft and RE4 befor
 found are remembered in `install-paths.txt`. (Without `prebuilt\`, it builds the mod and needs the Java 21 JDK.)
 
 ## Live Minecraft overlay
-While RE4 is in control, Minecraft skips drawing its world and renders only its hand, held item and HUD
-on a see-through background, at RE4's half resolution with GUI scale 2 and 60 FPS. Each frame goes into
-`reframework\data\minecraft_overlay.bin` (two picture slots), and the `re4_minecraft_overlay.dll`
-REFramework plugin (`re4-overlay-plugin/`, built with MinGW-w64 via `build.sh`) draws it over RE4. So the
-HUD, held items, swing animations, item names and attack indicator are Minecraft's own. Keep the Minecraft
+While RE4 is in control, Minecraft skips drawing its own world and renders only its things (your blocks,
+mobs, items, particles, hand, held item and HUD) on a see-through background, at RE4's resolution (up to
+1920x1080) with Minecraft's automatic GUI scale. Each frame goes into `reframework\data\minecraft_overlay.bin`
+(two picture slots), and the `re4_minecraft_overlay.dll` REFramework plugin (`re4-overlay-plugin/`, built
+with MinGW-w64 via `build.sh`) draws it over RE4. So the HUD, held items, swing animations, item names and
+attack indicator are Minecraft's own.
+
+Frames are drawn in lockstep: right before RE4 renders a frame, the plugin writes RE4's camera (position,
+direction, field of view) into the same file; Minecraft waits for it, draws its picture from exactly that
+camera (lined up through the terrain anchor), and tags the picture with the camera's number; the plugin
+shows each RE4 frame with the Minecraft picture made for it (waiting at most 12 ms; on a PC where
+Minecraft can't keep up it stops waiting for a while rather than slow RE4 down). Keep the Minecraft
 window open behind RE4 (not minimized). The Lua HUD only draws its own copy when the plugin isn't running.
 While Minecraft is in control, the plugin keeps the mouse and Minecraft's movement keys (WASD, Space,
 Shift, Ctrl, E, Q, 1-9) away from RE4, so Leon doesn't aim, ready his knife or run on his own. During RE4's
@@ -83,6 +95,11 @@ Copy the `.lua` files into `<RE4 game folder>\reframework\autorun\`. Settings: p
 - `minecraft_control.lua`: decides who has Leon (story mode, see above). **F7** = everything to RE4 and back.
   Menus are detected from Tab / I / M / Esc. Debug: Script Generated UI → Minecraft Control.
 - `minecraft_cutscenes.lua`: your Minecraft character in cutscenes (see above).
+- `minecraft_diagnostics.lua`: writes `reframework\data\minecraft_diagnostics.json` after a minute of play
+  (or **Save report now**): which RE4 methods the mod uses exist, Leon's joints, nearby enemies and their
+  health state, who had Leon how often, frame rate, how RE4's enemies pick targets and what RE4 offers for
+  adding objects to its world. **Record real hits** logs which RE4 functions run when RE4 itself hits an
+  enemy. Send that file (and `re2_framework_log.txt`, Minecraft's `logs\latest.log`) when reporting a problem.
 - `minecraft_terrain.lua`: terrain mode (see above). Scans a 10 m radius around Leon in 0.5 m cells and
   places Leon where Minecraft's player is, facing where you look (so RE4's **F** interacts with what you
   look at). Sends RE4's enemies near Leon to Minecraft. **F9** re-anchors the two worlds.
@@ -99,7 +116,7 @@ Copy the `.lua` files into `<RE4 game folder>\reframework\autorun\`. Settings: p
 A client-only Fabric mod for Minecraft Java **1.21.1**.
 
 1. Install a Java 21 JDK (e.g. Eclipse Temurin 21).
-2. Build: in `minecraft-bridge-mod`, run `gradlew.bat build` (Windows). The mod is `build\libs\re4bridge-0.9.0.jar`.
+2. Build: in `minecraft-bridge-mod`, run `gradlew.bat build` (Windows). The mod is `build\libs\re4bridge-0.10.0.jar`.
 3. Install Fabric Loader for 1.21.1 (Fabric installer, or a Fabric 1.21.1 profile in the CurseForge/Modrinth app)
    and put the jar in that profile's `mods` folder.
 4. Start Minecraft once. `config\re4bridge.txt` holds the path of the file it writes; change it if RE4 is

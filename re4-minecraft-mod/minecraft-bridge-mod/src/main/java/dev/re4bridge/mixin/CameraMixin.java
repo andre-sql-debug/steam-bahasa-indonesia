@@ -1,6 +1,7 @@
 package dev.re4bridge.mixin;
 
 import dev.re4bridge.Re4Bridge;
+import dev.re4bridge.Re4Camera;
 import dev.re4bridge.Re4Puppet;
 import dev.re4bridge.Re4Terrain;
 import net.minecraft.client.Camera;
@@ -26,11 +27,17 @@ public abstract class CameraMixin {
 
     @Shadow protected abstract void setRotation(float yaw, float pitch);
 
-    // In a cutscene where your character plays Leon, look through RE4's cutscene camera
+    // Draw from RE4's own camera of this frame (Re4Camera), so Minecraft's things sit exactly in RE4's world.
+    // In a cutscene where your character plays Leon, that's RE4's cutscene camera, looking at your character.
     @Inject(method = "setup", at = @At("TAIL"))
-    private void re4bridge$cutsceneCamera(CallbackInfo ci) {
-        if (Re4Puppet.hasCamera()) {
+    private void re4bridge$re4Camera(CallbackInfo ci) {
+        if (Re4Puppet.active()) {
             this.detached = true;
+        }
+        if (Re4Camera.active()) {
+            this.setRotation(Re4Camera.yaw(), Re4Camera.pitch());
+            this.setPosition(Re4Camera.position());
+        } else if (Re4Puppet.hasCamera()) {
             this.setRotation(Re4Puppet.cameraYaw(), Re4Puppet.cameraPitch());
             this.setPosition(Re4Puppet.cameraPosition());
         }

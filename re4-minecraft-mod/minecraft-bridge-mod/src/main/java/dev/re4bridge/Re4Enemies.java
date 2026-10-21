@@ -6,10 +6,12 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.monster.Husk;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.entity.projectile.Projectile;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
@@ -24,10 +26,15 @@ import java.util.concurrent.ConcurrentHashMap;
  * Minecraft mobs fight them (iron golems go after them by themselves, tamed wolves after what you hit).
  * Damage done to a stand-in is added up per enemy and sent back to RE4, which takes it off the real enemy.
  * Stand-ins never die in Minecraft; they disappear when the RE4 enemy dies or goes away.
+ * RE4's enemies fight back: a mob that attacks one and stands within its reach gets hit by it.
  */
 public final class Re4Enemies {
     public static final String TAG = "re4_enemy";
     private static final double MAX_HEALTH = 1024.0;
+    // An RE4 enemy's blow on a Minecraft mob (a Ganado's swing: 2 hearts), at most this often
+    private static final float ENEMY_HIT = 4.0F;
+    private static final int ENEMY_HIT_TICKS = 24;
+    private static final double ENEMY_REACH = 2.2;
 
     /** One RE4 enemy, at its Minecraft position. */
     public record Target(String key, double x, double y, double z) {
@@ -36,6 +43,7 @@ public final class Re4Enemies {
     private static volatile List<Target> targets = List.of();
     // Server thread only
     private static final Map<String, UUID> proxies = new HashMap<>();
+    private static final Map<String, Long> lastHitTick = new HashMap<>();
     private static int sweepTicks = 0;
     // Written on the server thread, read on the client thread
     private static final Map<UUID, String> keyOf = new ConcurrentHashMap<>();
@@ -110,6 +118,7 @@ public final class Re4Enemies {
                 old.discard();
             }
             keyOf.remove(entry.getValue());
+            lastHitTick.remove(entry.getKey());
             return true;
         });
 
@@ -137,6 +146,7 @@ public final class Re4Enemies {
                 }
                 husk.setHealth((float) MAX_HEALTH);
                 husk.clearFire();
+                hitBack(level, husk, t.key());
             }
         }
 
@@ -150,6 +160,28 @@ public final class Re4Enemies {
                 }
             }
             leftovers.forEach(Entity::discard);
+        }
+    }
+
+    // The mob fighting this RE4 enemy, if it is in the enemy's reach, takes a blow now and then
+    private static void hitBack(ServerLevel level, Husk standIn, String key) {
+        long now = level.getGameTime();
+        Long last = lastHitTick.get(key);
+        if (last != null && now - last < ENEMY_HIT_TICKS) {
+            return;
+        }
+        AABB reach = standIn.getBoundingBox().inflate(ENEMY_REACH, 1.0, ENEMY_REACH);
+        Mob attacker = null;
+        double best = Double.MAX_VALUE;
+        for (Mob mob : level.getEntitiesOfClass(Mob.class, reach, m -> m.isAlive() && m.getTarget() == standIn && !isStandIn(m))) {
+            double d = mob.distanceToSqr(standIn);
+            if (d < best) {
+                best = d;
+                attacker = mob;
+            }
+        }
+        if (attacker != null && attacker.hurt(level.damageSources().mobAttack(standIn), ENEMY_HIT)) {
+            lastHitTick.put(key, now);
         }
     }
 

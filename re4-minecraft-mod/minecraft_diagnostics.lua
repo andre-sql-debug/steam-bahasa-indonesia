@@ -5,7 +5,9 @@
 --  * Leon's joint names (for your Minecraft character's arms and legs in cutscenes),
 --  * enemies near Leon and their health state,
 --  * who had Leon how often (minecraft_control.lua), frame rate, the latest data files,
---  * which RE4 functions run when RE4 itself hits an enemy ("Record real hits"), to make enemies flinch.
+--  * which RE4 functions run when RE4 itself hits an enemy ("Record real hits"), to make enemies flinch,
+--  * how RE4's enemies pick and attack a target, and what RE4 offers for adding objects to its world
+--    (so Minecraft mobs can become targets of RE4's enemies).
 -- It writes a report on its own after about a minute of play; "Save report now" writes one at any time.
 -- It only reads and logs; the test buttons are the only things that change the game.
 -- Settings: press Insert -> Script Generated UI -> Minecraft Diagnostics
@@ -119,6 +121,111 @@ local function damage_members()
         end
         out[type_name] = td and list or "not found"
     end
+    return out
+end
+
+------------------------------------------------------------------------------
+-- How enemies choose and attack targets; what RE4 offers for adding objects to its world
+------------------------------------------------------------------------------
+
+local AI_KEYWORDS = { "target", "aim", "attack", "think", "notice", "sensor", "sight", "find", "lockon", "lock_on",
+    "hate", "threat", "buddy", "player", "wince", "reaction", "flinch", "stagger", "knock" }
+
+local function ai_interesting(name)
+    local l = name:lower()
+    for _, k in ipairs(AI_KEYWORDS) do
+        if l:find(k, 1, true) then return true end
+    end
+    return false
+end
+
+-- AI related members of a type and its parents (at most `limit`)
+local function ai_members(td, limit)
+    local out = {}
+    local depth = 0
+    while td ~= nil and depth < 8 and #out < limit do
+        local tname = td:get_full_name()
+        if tname:find("^System%.") or tname:find("^via%.clr") then break end
+        for _, m in ipairs(td:get_methods() or {}) do
+            local ok, n = pcall(function() return m:get_name() end)
+            if ok and n and ai_interesting(n) and #out < limit then out[#out + 1] = tname .. " :: " .. signature(m) end
+        end
+        for _, f in ipairs(td:get_fields() or {}) do
+            local ok, n = pcall(function() return f:get_name() end)
+            if ok and n and ai_interesting(n) and #out < limit then
+                local ft = f:get_type()
+                out[#out + 1] = tname .. " :: field " .. (ft and ft:get_full_name() or "?") .. " " .. n
+            end
+        end
+        td = td:get_parent_type()
+        depth = depth + 1
+    end
+    return out
+end
+
+local SPAWN_API = {
+    ["via.GameObject"] = { "create", "createComponent", "destroy", "set_DrawSelf" },
+    ["via.render.Mesh"] = { "setMesh", "set_Material", "setMaterial", "getMesh", "get_Mesh" },
+    ["via.Prefab"] = { "instantiate", "set_Path", "get_Path" },
+    ["via.Folder"] = { "get_Path" },
+    ["via.Scene"] = { "findFolder", "get_FirstTransform" },
+}
+local SPAWN_MANAGERS = { "chainsaw.CharacterManager", "chainsaw.SpawnManager", "chainsaw.EnemySpawnManager",
+    "chainsaw.CharacterSpawnController", "chainsaw.EnemySpawnController", "chainsaw.CharacterSpawner",
+    "chainsaw.SpawnController", "chainsaw.EnemyManager", "chainsaw.NpcManager", "chainsaw.BuddyManager" }
+
+local function ai_and_spawn(enemy)
+    local out = { enemy = "no enemy near Leon", spawn_api = {}, spawn_managers = {},
+        create_resource = type(sdk.create_resource) == "function", create_instance = type(sdk.create_instance) == "function" }
+    for type_name, methods in pairs(SPAWN_API) do
+        local td = sdk.find_type_definition(type_name)
+        local found = {}
+        if td ~= nil then
+            for _, m in ipairs(td:get_methods() or {}) do
+                local ok, n = pcall(function() return m:get_name() end)
+                if ok and n then
+                    for _, want in ipairs(methods) do
+                        if n == want then found[#found + 1] = signature(m) end
+                    end
+                end
+            end
+        end
+        out.spawn_api[type_name] = td and found or "not found"
+    end
+    for _, name in ipairs(SPAWN_MANAGERS) do
+        local td = sdk.find_type_definition(name)
+        out.spawn_managers[name] = td and ai_members(td, 40) or "not found"
+        if td ~= nil then
+            local spawn = {}
+            for _, m in ipairs(td:get_methods() or {}) do
+                local ok, n = pcall(function() return m:get_name() end)
+                if ok and n and (n:lower():find("spawn", 1, true) or n:lower():find("create", 1, true)) then
+                    spawn[#spawn + 1] = signature(m)
+                end
+            end
+            out.spawn_managers[name .. " (spawn)"] = spawn
+        end
+    end
+    if enemy == nil then return out end
+    local e = { context = ai_members(enemy:get_type_definition(), 120), components = {} }
+    local body = try_call(enemy, "get_BodyGameObject")
+    local comps = body and try_call(body, "get_Components")
+    local ok, elems = pcall(function() return comps:get_elements() end)
+    if ok and elems then
+        for _, c in ipairs(elems) do
+            local okt, td = pcall(function() return c:get_type_definition() end)
+            if okt and td then
+                local entry = { type = td:get_full_name(), members = ai_members(td, 40) }
+                -- The enemy's model file, to know how RE4 names its meshes
+                if entry.type == "via.render.Mesh" then
+                    local holder = try_call(c, "getMesh") or try_call(c, "get_Mesh")
+                    entry.mesh = holder and (try_call(holder, "get_ResourcePath") or try_call(holder, "ToString")) or nil
+                end
+                e.components[#e.components + 1] = entry
+            end
+        end
+    end
+    out.enemy = e
     return out
 end
 
@@ -346,7 +453,7 @@ write_report = function()
     local gui = {}
     for name, n in pairs(gui_names) do gui[#gui + 1] = { name = name, draws = n } end
     table.sort(gui, function(a, b) return a.draws > b.draws end)
-    local enemies = nearest_enemies(8)
+    local enemies, nearest = nearest_enemies(8)
     local report = {
         time = os.date and os.date("%Y-%m-%d %H:%M:%S") or "?",
         frames = frames,
@@ -356,6 +463,7 @@ write_report = function()
         who_had_leon = mode_counts,
         methods = check_methods(),
         damage_members = damage_members(),
+        enemy_ai_and_spawning = ai_and_spawn(nearest),
         leon = leon_info(),
         enemies = enemies,
         camera = camera_info(),
