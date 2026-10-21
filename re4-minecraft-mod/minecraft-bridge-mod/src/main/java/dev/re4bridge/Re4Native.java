@@ -301,17 +301,23 @@ public final class Re4Native {
             if (!Files.exists(mesh)) {
                 writeAtomically(mesh, Re4NativeFiles.mesh(MATERIAL_NAME, positions, normals, uvs));
             }
-            Path tex = nativesFolder.resolve(texName + ".tex." + Re4NativeFiles.TEX_VERSION);
+            // The material is written last, so once it exists its textures do too
             Path mdf = nativesFolder.resolve(texName + ".mdf2." + Re4NativeFiles.MDF_VERSION);
-            if (!Files.exists(tex) || !Files.exists(mdf)) {
+            if (!Files.exists(mdf)) {
                 int[] image = gpuImage != null ? gpuImage : readTexture(location);   // width, height, then RGBA pixels
                 if (image == null) {
                     failedTextures.add(texture);
                     Re4Bridge.LOGGER.info("RE4 Bridge: texture {} can't be read; that part stays drawn by Minecraft", texture);
                     return;
                 }
-                writeAtomically(tex, Re4NativeFiles.texture(image, MAX_TEXTURE_SIZE));
-                writeAtomically(mdf, Re4NativeFiles.material(MATERIAL_NAME, FOLDER + "/" + texName + ".tex"));
+                Re4NativeFiles.Textures textures = Re4NativeFiles.textures(image, MAX_TEXTURE_SIZE);
+                String cutoutName = texName + "_a";
+                if (textures.cutout() != null) {
+                    writeAtomically(nativesFolder.resolve(cutoutName + ".tex." + Re4NativeFiles.TEX_VERSION), textures.cutout());
+                }
+                writeAtomically(nativesFolder.resolve(texName + ".tex." + Re4NativeFiles.TEX_VERSION), textures.color());
+                writeAtomically(mdf, Re4NativeFiles.material(MATERIAL_NAME, FOLDER + "/" + texName + ".tex",
+                        textures.cutout() != null ? FOLDER + "/" + cutoutName + ".tex" : null));
             }
             ready.put(export.id(), export);
             writeAssets();
