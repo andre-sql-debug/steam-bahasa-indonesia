@@ -79,6 +79,11 @@ public final class Re4Enemies {
         targets = parsed;
     }
 
+    /** No stand-ins are being updated (no integrated server): no fights to report. */
+    public static void clearEngaged() {
+        engaged = "";
+    }
+
     public static void clearTargets() {
         targets = List.of();
     }
@@ -163,7 +168,7 @@ public final class Re4Enemies {
                     if (eyes != null) {
                         engagedNow.append(t.key()).append(',').append(String.format(java.util.Locale.ROOT, "%.2f,%.2f,%.2f;", eyes.x, eyes.y, eyes.z));
                     }
-                    hitBack(level, husk, t.key(), attacker);
+                    hitBack(level, husk, t.key());
                 }
             }
         }
@@ -184,7 +189,7 @@ public final class Re4Enemies {
 
     // The nearest mob going for this RE4 enemy's stand-in, or null
     private static Mob nearestAttacker(ServerLevel level, Husk standIn) {
-        AABB area = standIn.getBoundingBox().inflate(ENGAGE_RANGE, 4.0, ENGAGE_RANGE);
+        AABB area = standIn.getBoundingBox().inflate(ENGAGE_RANGE);
         Mob attacker = null;
         double best = Double.MAX_VALUE;
         for (Mob mob : level.getEntitiesOfClass(Mob.class, area, m -> m.isAlive() && m.getTarget() == standIn && !isStandIn(m))) {
@@ -197,15 +202,24 @@ public final class Re4Enemies {
         return attacker;
     }
 
-    // The mob fighting this RE4 enemy, if it is in the enemy's reach, takes a blow now and then
-    private static void hitBack(ServerLevel level, Husk standIn, String key, Mob attacker) {
+    // A mob fighting this RE4 enemy within the enemy's reach takes a blow now and then (the nearest one)
+    private static void hitBack(ServerLevel level, Husk standIn, String key) {
         long now = level.getGameTime();
         Long last = lastHitTick.get(key);
         if (last != null && now - last < ENEMY_HIT_TICKS) {
             return;
         }
         AABB reach = standIn.getBoundingBox().inflate(ENEMY_REACH, 1.0, ENEMY_REACH);
-        if (attacker.getBoundingBox().intersects(reach) && attacker.hurt(level.damageSources().mobAttack(standIn), ENEMY_HIT)) {
+        Mob target = null;
+        double best = Double.MAX_VALUE;
+        for (Mob mob : level.getEntitiesOfClass(Mob.class, reach, m -> m.isAlive() && m.getTarget() == standIn && !isStandIn(m))) {
+            double d = mob.distanceToSqr(standIn);
+            if (d < best) {
+                best = d;
+                target = mob;
+            }
+        }
+        if (target != null && target.hurt(level.damageSources().mobAttack(standIn), ENEMY_HIT)) {
             lastHitTick.put(key, now);
         }
     }

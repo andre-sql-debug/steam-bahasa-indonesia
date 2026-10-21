@@ -816,6 +816,14 @@ local function find_method_in(td, name)
 end
 
 -- The component of this enemy that has RE4's "look at this point" (enemies' body updaters), or false
+local look_methods = {}   -- component type name -> { set, clear } or false (looked up once per type)
+
+local function body_address(enemy)
+    local body = try_call(enemy, "get_BodyGameObject")
+    local ok, address = pcall(function() return body:get_address() end)
+    return ok and address or nil
+end
+
 local function look_handle(enemy)
     local body = try_call(enemy, "get_BodyGameObject")
     local comps = body and try_call(body, "get_Components")
@@ -823,11 +831,15 @@ local function look_handle(enemy)
     if not ok or elems == nil then return false end
     for _, comp in ipairs(elems) do
         local okt, td = pcall(function() return comp:get_type_definition() end)
-        if okt and td ~= nil then
-            local set = find_method_in(td, "setForceLookAtTarget(via.vec3)")
-            if set ~= nil then
-                return { comp = comp, set = set, clear = find_method_in(td, "clearForceLookAtTarget") }
+        local okn, name = pcall(function() return td:get_full_name() end)
+        if okt and okn and name ~= nil then
+            local m = look_methods[name]
+            if m == nil then
+                local set = find_method_in(td, "setForceLookAtTarget(via.vec3)")
+                m = set ~= nil and { set = set, clear = find_method_in(td, "clearForceLookAtTarget") } or false
+                look_methods[name] = m
             end
+            if m then return { comp = comp, set = m.set, clear = m.clear } end
         end
     end
     return false
@@ -837,11 +849,30 @@ local function let_go(a)
     if a.look and a.look.clear then pcall(function() a.look.clear:call(a.look.comp) end) end
 end
 
+-- Body addresses of every enemy RE4 still has (living or dead): only those enemies' parts are touched
+local function present_bodies()
+    local out = {}
+    local cm = get_character_manager()
+    local list = cm and try_call(cm, "get_EnemyContextList")
+    local count = list and try_call(list, "get_Count") or 0
+    for i = 0, count - 1 do
+        local enemy = try_call(list, "get_Item", i)
+        local address = enemy and body_address(enemy)
+        if address ~= nil then out[address] = true end
+    end
+    return out
+end
+
+-- Let every enemy look where RE4 wants again (cutscenes, menus, combat off). Enemies RE4 no longer has
+-- are left alone: their parts may already be freed.
 local function release_attention()
+    if next(attention) == nil then return end
+    local present = present_bodies()
     for key, a in pairs(attention) do
-        let_go(a)
+        if a.body ~= nil and present[a.body] then let_go(a) end
         attention[key] = nil
     end
+    debug.attention = "no fights"
 end
 
 -- The living enemies right now: key -> enemy context
@@ -870,10 +901,17 @@ local function update_enemy_attention()
         end
     end
     -- Fights that ended
-    for key, a in pairs(attention) do
-        if wanted[key] == nil then
-            let_go(a)
-            attention[key] = nil
+    local ended = false
+    for key in pairs(attention) do
+        if wanted[key] == nil then ended = true end
+    end
+    if ended then
+        local present = present_bodies()
+        for key, a in pairs(attention) do
+            if wanted[key] == nil then
+                if a.body ~= nil and present[a.body] then let_go(a) end
+                attention[key] = nil
+            end
         end
     end
     if count == 0 then
@@ -883,23 +921,33 @@ local function update_enemy_attention()
     if state.frame % LOOK_REFRESH_FRAMES ~= 0 then return end
 
     local living = living_enemies()
+    local present = nil
     local looking = 0
     for key, target in pairs(wanted) do
         local enemy = living[key]
         local a = attention[key]
         if enemy == nil then
-            -- dead or gone: let go (a dead enemy's parts are not touched again)
-            if a ~= nil then let_go(a) end
+            -- dead: let go once; gone: leave its parts alone
+            if a ~= nil then
+                present = present or present_bodies()
+                if a.body ~= nil and present[a.body] then let_go(a) end
+            end
             attention[key] = nil
         else
+            local body = body_address(enemy)
+            if a ~= nil and a.body ~= body then
+                attention[key] = nil   -- a different enemy now has this address: its old handle is not touched
+                a = nil
+            end
             if a == nil or (a.look == false and state.frame - a.looked_up > LOOK_RETRY_FRAMES) then
-                a = { look = look_handle(enemy), looked_up = state.frame }
+                a = { look = look_handle(enemy), looked_up = state.frame, body = body }
                 attention[key] = a
             end
             if a.look then
                 if pcall(function() a.look.set:call(a.look.comp, target) end) then
                     looking = looking + 1
                 else
+                    let_go(a)          -- undo an earlier look before giving up on this handle
                     a.look = false
                 end
             end
@@ -1081,7 +1129,10 @@ re.on_pre_application_entry("UpdatePhysicsCharacterController", function()
     read_bridge()
     read_sent_look()
     local player = get_player()
-    if player == nil then return end
+    if player == nil then
+        release_attention()   -- loading, game over, menus without Leon: let go while the enemies still exist
+        return
+    end
     local dt = get_delta_time(player)
     state.time = state.time + dt
 
@@ -1090,7 +1141,8 @@ re.on_pre_application_entry("UpdatePhysicsCharacterController", function()
     local re4_has_leon = type(control) == "table" and control.mode ~= "minecraft"
 
     if state.frame < state.settle_until then
-        -- Give everything back to the game while it loads or teleports Leon
+        -- Give everything back to the game while it loads or teleports Leon (cutscenes often start here)
+        release_attention()
         set_vertical(player, nil)
         if state.flying then set_flying(player, false) end
         state.velocity = Vector3f.new(0, 0, 0)

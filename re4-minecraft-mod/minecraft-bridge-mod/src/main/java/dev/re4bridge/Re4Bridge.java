@@ -606,6 +606,8 @@ public class Re4Bridge implements ClientModInitializer {
         if (server != null) {
             var uuid = player.getUUID();
             server.execute(() -> Re4Enemies.update(server, uuid));
+        } else {
+            Re4Enemies.clearEngaged();
         }
     }
 

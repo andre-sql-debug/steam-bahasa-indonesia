@@ -377,6 +377,7 @@ local hooked = {}
 local captures = {}        -- the first hits while recording: who was hit and every field of the DamageInfo
 local motion_log = {}      -- the nearest enemy's animation/state changes while recording, with the hits
 local replay = nil         -- the last hit on an enemy: { hc, info (a copy), body_address, frame }
+local replaying = false    -- the flinch test is calling callbackDamageHit itself (not a real hit)
 local MAX_CAPTURES = 4
 local MAX_MOTION_LOG = 300
 local last_motion_key = nil
@@ -430,7 +431,9 @@ dump_fields = function(obj, depth)
             if okf and not static then
                 local okv, v = pcall(function() return f:get_data(obj) end)
                 local okft, ft = pcall(function() return f:get_type():get_full_name() end)
-                out[#out + 1] = { name = name, type = okft and ft or "?", value = okv and value_of(v, depth) or "?" }
+                local value = "?"
+                if okv then value = value_of(v, depth) end   -- (okv and value_of(...) or "?") turns false into "?"
+                out[#out + 1] = { name = name, type = okft and ft or "?", value = value }
             end
         end
         local okp, parent = pcall(function() return td:get_parent_type() end)
@@ -477,7 +480,18 @@ local function on_damage_hit(args)
     if #captures < MAX_CAPTURES then
         captures[#captures + 1] = { frame = frames, hit = tostring(name), on_leon = on_leon, fields = dump_fields(info, 0) }
     end
-    if not on_leon then
+    -- Only hits on enemies arm the flinch test (not Leon, crates or other objects)
+    local on_enemy = false
+    local cm = sdk.get_managed_singleton(sdk.game_namespace("CharacterManager"))
+    local list = cm and try_call(cm, "get_EnemyContextList")
+    local count = list and try_call(list, "get_Count") or 0
+    local hit_address = address_of(go)
+    for i = 0, count - 1 do
+        local e = try_call(list, "get_Item", i)
+        local b = e and try_call(e, "get_BodyGameObject")
+        if b ~= nil and hit_address ~= nil and address_of(b) == hit_address then on_enemy = true end
+    end
+    if on_enemy then
         -- Keep a copy for the flinch test (RE4 may reuse the original for its next hit)
         local okc, copy = pcall(function() return info:call("MemberwiseClone") end)
         if okc and copy ~= nil then
@@ -504,7 +518,7 @@ local function hook_all()
                 local is_damage_hit = type_name == "chainsaw.HitController" and n == "callbackDamageHit"
                 pcall(function()
                     sdk.hook(m, function(args)
-                        if not recording then return end
+                        if not recording or replaying then return end
                         hook_counts[key] = (hook_counts[key] or 0) + 1
                         if hook_args[key] == nil then hook_args[key] = arg_types(args) end
                         if is_damage_hit then pcall(on_damage_hit, args) end
@@ -575,7 +589,16 @@ local live = nil           -- the running test
 local live_results = {}
 local LOOK_BASE_FRAMES, LOOK_FRAMES = 45, 90
 local WALK_BASE_FRAMES, WALK_FRAMES = 60, 180
-local FLINCH_FRAMES = 90
+local FLINCH_BASE_FRAMES, FLINCH_FRAMES = 45, 90
+
+-- A look test must never leave the enemy staring at its point
+local function release_look()
+    if live ~= nil and live.kind == "look" then
+        for _, h in ipairs(live.handles or {}) do
+            if h.second then pcall(function() h.second:call(h.comp) end) end
+        end
+    end
+end
 
 local function find_method_in(td, name)
     local depth = 0
@@ -668,6 +691,7 @@ local function start_live(kind)
         live.handles = components_with(enemy, "set_TargetPos(via.vec3)")
         live.target = side_point(epos, me, 4.0, 0.0)
         live.start = epos
+        live.leon_start = me
         live.path = {}
         r.components = {}
         for _, h in ipairs(live.handles) do r.components[#r.components + 1] = h.type end
@@ -703,6 +727,7 @@ local function start_live(kind)
         live_results[#live_results + 1] = r
         log("live test " .. kind .. ": " .. r.result)
         live = nil
+        report_now = true
         return
     end
     log("live test " .. kind .. " running on " .. r.enemy .. "...")
@@ -762,20 +787,32 @@ local function step_live()
                 if n > 0 and sum / n > best_score then best_axis, best_score = ai, sum / n end
             end
             local to_target, to_leon, n = 0, 0, 0
+            local base_target, nb = 0, 0
             for _, s in ipairs(t.samples) do
-                if s.forcing and best_axis ~= nil then
+                if best_axis ~= nil then
                     local dir = q_rotate(s.q, AXES[best_axis])
-                    to_target = to_target + cos_to(dir, s.head, t.target)
-                    to_leon = to_leon + cos_to(dir, s.head, s.leon)
-                    n = n + 1
+                    if s.forcing then
+                        to_target = to_target + cos_to(dir, s.head, t.target)
+                        to_leon = to_leon + cos_to(dir, s.head, s.leon)
+                        n = n + 1
+                    else
+                        base_target = base_target + cos_to(dir, s.head, t.target)
+                        nb = nb + 1
+                    end
                 end
             end
             t.result.head_axis = best_axis
-            t.result.before_aim_at_leon = best_score
+            t.result.before_aim_at_leon = best_axis and best_score or nil
+            t.result.before_aim_at_target = nb > 0 and base_target / nb or nil
             t.result.forced_aim_at_target = n > 0 and to_target / n or nil
             t.result.forced_aim_at_leon = n > 0 and to_leon / n or nil
-            t.result.result = (n > 0 and to_target / n > 0.8) and "the head turned to the point (look-at works)"
-                or "the head did not clearly turn to the point"
+            if best_axis == nil or best_score < 0.8 then
+                t.result.result = "can't tell: the enemy was not looking at Leon before the test (let it see you, run it again)"
+            elseif n > 0 and nb > 0 and to_target / n - base_target / nb > 0.3 then
+                t.result.result = "the head turned to the point (look-at works)"
+            else
+                t.result.result = "the head did not clearly turn to the point"
+            end
             finish_live()
         end
     elseif t.kind == "walk" then
@@ -796,38 +833,85 @@ local function step_live()
             t.result.moved = (first_forced and last) and dist(first_forced, last) or nil
             t.result.leon_distance_end = (last and me) and dist(last, me) or nil
             local closer = (t.result.target_distance_start or 0) - (t.result.target_distance_end or 0)
-            t.result.result = closer > 1.5 and "the enemy walked toward the point (navigation target works)"
-                or "the enemy did not walk to the point"
+            local b1, b2 = nil, nil
+            for _, p in ipairs(t.path) do if not p.forcing then b1 = b1 or p; b2 = p end end
+            local by_itself = (b1 and b2) and (dist(b1, t.target) - dist(b2, t.target)) * WALK_FRAMES / WALK_BASE_FRAMES or 0
+            t.result.closer_by_itself = by_itself
+            t.result.leon_moved = (t.leon_start and me) and dist(t.leon_start, me) or nil
+            if (t.result.leon_moved or 0) > 1.0 then
+                t.result.result = "can't tell: Leon moved during the test (stand still, run it again)"
+            else
+                t.result.result = (closer > 1.5 and closer - by_itself > 1.5)
+                    and "the enemy walked toward the point (navigation target works)" or "the enemy did not walk to the point"
+            end
             finish_live()
         end
     elseif t.kind == "flinch" then
+        -- First a while without the hit (does its animation change by itself?), then the replayed hit
         local state = motion_state(enemy)
+        local f = t.frame - FLINCH_BASE_FRAMES   -- frames since the replayed hit
         if t.frame == 1 then
+            t.last_state, t.base_changes = state, 0
+        elseif f < 1 and state ~= t.last_state then
+            t.base_changes = t.base_changes + 1
+            t.last_state = state
+        end
+        if f == 1 then
             t.result.hp_before = try_call(hp, "get_CurrentHitPoint")
             t.result.motion_before = state
             t.last_state = state
+            -- full health for the replay so it can't kill the enemy (its own health comes back at the end)
+            t.max = try_call(hp, "get_DefaultHitPoint")
+            if t.max ~= nil then try_call(hp, "set_CurrentHitPoint", t.max) end
+            replaying = true
             local ok, err = pcall(function() replay.hc:call("callbackDamageHit(chainsaw.HitController.DamageInfo)", replay.info) end)
+            replaying = false
             t.result.call = ok and "called" or ("failed: " .. tostring(err))
             t.result.hp_after_call = try_call(hp, "get_CurrentHitPoint")
-        elseif state ~= t.last_state then
-            t.changes[#t.changes + 1] = string.format("[%d] %s", t.frame, state)
+        elseif f > 1 and state ~= t.last_state then
+            t.changes[#t.changes + 1] = string.format("[%d] %s", f, state)
             t.last_state = state
         end
-        if t.frame == 3 then
-            -- give back the health the replayed hit took (the test is about the reaction)
-            local before, now = t.result.hp_before, try_call(hp, "get_CurrentHitPoint")
-            if before ~= nil and now ~= nil and now < before and now > 0 then try_call(hp, "set_CurrentHitPoint", before) end
+        if f >= 1 and t.max ~= nil then
+            -- RE4 may apply the damage a few frames later: keep the enemy alive until the end
+            local now = try_call(hp, "get_CurrentHitPoint")
+            if now ~= nil and now < t.max then
+                t.result.damage_seen = math.max(t.result.damage_seen or 0, t.max - now)
+                try_call(hp, "set_CurrentHitPoint", t.max)
+            end
         end
-        if t.frame >= FLINCH_FRAMES then
+        if f >= FLINCH_FRAMES then
+            if t.result.hp_before ~= nil then try_call(hp, "set_CurrentHitPoint", t.result.hp_before) end
             t.result.motion_changes = t.changes
-            t.result.result = #t.changes > 0 and "the enemy's animation changed after the replayed hit (watch: did it flinch?)"
-                or "no animation change after the replayed hit"
+            t.result.changes_before_replay = t.base_changes
+            local quick = false
+            for _, c in ipairs(t.changes) do
+                local n = tonumber(c:match("^%[(%d+)%]"))
+                if n ~= nil and n <= 10 then quick = true end
+            end
+            if not quick then
+                t.result.result = "no animation change right after the replayed hit"
+            elseif t.base_changes == 0 then
+                t.result.result = "the enemy's animation changed right after the replayed hit (it reacted)"
+            else
+                t.result.result = "the animation changed after the replayed hit, but it also changed by itself before (watch: did it flinch?)"
+            end
             finish_live()
         end
     end
 end
 
 re.on_pre_application_entry("UpdateBehavior", function()
+    -- No Leon (loading, title screen): the recorded hit's enemy and objects may be gone, never replay it,
+    -- and a running test stops without touching its enemy again
+    if (replay ~= nil or live ~= nil) and player_context() == nil then
+        replay = nil
+        if live ~= nil then
+            live.result.result = "stopped: Leon went away (loading or menu)"
+            live_results[#live_results + 1] = live.result
+            live = nil
+        end
+    end
     if pending_test ~= nil then
         local k = pending_test
         pending_test = nil
@@ -844,6 +928,7 @@ re.on_pre_application_entry("UpdateBehavior", function()
         if not ok then
             log("live test error: " .. tostring(e))
             if live ~= nil then
+                release_look()
                 live.result.result = "error: " .. tostring(e)
                 live_results[#live_results + 1] = live.result
                 live = nil
@@ -864,6 +949,8 @@ re.on_pre_application_entry("UpdateBehavior", function()
         end
     end
 end)
+
+re.on_script_reset(release_look)
 
 -- The walk test also sets the target late in the frame, after RE4's own behavior had its say
 re.on_application_entry("LateUpdateBehavior", function()
