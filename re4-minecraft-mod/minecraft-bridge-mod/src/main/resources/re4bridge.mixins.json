@@ -6,6 +6,7 @@
     "CameraMixin",
     "GameRendererMixin",
     "HumanoidModelMixin",
+    "InputConstantsMixin",
     "KeyboardInputMixin",
     "LevelRendererMixin",
     "MinecraftMixin",

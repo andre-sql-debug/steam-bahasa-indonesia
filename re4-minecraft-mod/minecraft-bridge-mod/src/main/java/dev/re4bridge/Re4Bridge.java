@@ -781,7 +781,7 @@ public class Re4Bridge implements ClientModInitializer {
         state.addProperty("re4_control", remoteKeys() != null);
         state.addProperty("overlay", overlayActive);
         // A Minecraft screen is open (inventory, creative menu, chat): RE4's scripts stop looking and moving
-        state.addProperty("screen_open", mc.screen != null);
+        state.addProperty("screen_open", overlayActive && !re4Turn && mc.screen != null);
         // Mouse settings, so RE4's mouse look turns exactly like Minecraft's
         state.addProperty("sensitivity", mc.options.sensitivity().get());
         state.addProperty("invert_mouse", mc.options.invertYMouse().get());

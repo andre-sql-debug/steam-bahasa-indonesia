@@ -63,10 +63,9 @@ local function read_bridge()
         end
         data = d
     end
-    -- Tell the other scripts when a Minecraft screen (inventory, creative menu, chat) is open
-    if type(MinecraftRE4Control) == "table" then
-        MinecraftRE4Control.minecraft_screen = data ~= nil and data.screen_open == true
-            and frames_since_change < DISCONNECT_FRAMES
+    -- Minecraft went away: no Minecraft screen takes RE4's keys any more (update_input sets it otherwise)
+    if type(MinecraftRE4Control) == "table" and (data == nil or frames_since_change >= DISCONNECT_FRAMES) then
+        MinecraftRE4Control.minecraft_screen = false
     end
 end
 
@@ -853,8 +852,11 @@ local function update_input()
         input.re4_keys = re4_moves
         changed = true
     end
-    -- A Minecraft screen is open: its keys and mouse go straight to Minecraft (the overlay plugin passes them)
-    local minecraft_screen = data ~= nil and data.screen_open == true
+    -- A Minecraft screen is open and gets RE4's keys and mouse (through the overlay plugin): tell the other
+    -- scripts, and send no movement or clicks of our own
+    read_plugin_mouse()
+    local minecraft_screen = data ~= nil and data.screen_open == true and not turn and plugin_mouse_alive()
+    if type(MinecraftRE4Control) == "table" then MinecraftRE4Control.minecraft_screen = minecraft_screen end
     local menu = menu_open() or turn or minecraft_screen
     for name, keys in pairs(MOVE_KEYS) do
         local down = not menu and not re4_moves and any_key_down(keys)
@@ -864,8 +866,7 @@ local function update_input()
         end
     end
     if menu then
-        -- Clicks made meanwhile were for RE4, not Minecraft
-        read_plugin_mouse()
+        -- Clicks made meanwhile were for RE4 (or Minecraft's screen), not attacks
         plugin_new_presses("left")
         plugin_new_presses("right")
         if input.keys.attack or input.keys.use then
@@ -894,7 +895,6 @@ local function update_input()
     end
 
     -- Left: attack / break (held = keep mining). Right: Minecraft's "use" (place blocks...)
-    read_plugin_mouse()
     local mouse, new_left, new_right
     local right
     if plugin_mouse_alive() then

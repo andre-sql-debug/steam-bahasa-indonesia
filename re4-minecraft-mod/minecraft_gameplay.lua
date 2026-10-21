@@ -325,6 +325,9 @@ end
 ------------------------------------------------------------------------------
 
 local function local_keys()
+    -- Typing in a Minecraft screen (chat, creative search) is not walking
+    local c = MinecraftRE4Control
+    if type(c) == "table" and c.minecraft_screen then return {} end
     return {
         w = key_down(KEY.W), a = key_down(KEY.A), s = key_down(KEY.S), d = key_down(KEY.D),
         jump = key_down(KEY.SPACE), sneak = key_down(KEY.SNEAK), sprint = key_down(KEY.SPRINT),
@@ -548,13 +551,16 @@ local function hp_api(hp)
             return false
         end
         api = {
-            add_damage = find("addDamage(System.Int32)", "addDamage"),
+            add_damage = find("addDamage(System.Int32)"),
             dead = find("dead()", "dead"),
         }
         -- only use addDamage when it takes exactly one int (other overloads would get garbage)
         if api.add_damage then
-            local okp, n = pcall(function() return api.add_damage:get_num_params() end)
-            if not okp or n ~= 1 then api.add_damage = false end
+            local okp, ok_int = pcall(function()
+                local types = api.add_damage:get_param_types()
+                return api.add_damage:get_num_params() == 1 and types[1]:get_full_name() == "System.Int32"
+            end)
+            if not okp or not ok_int then api.add_damage = false end
         end
         hp_api_cache[name] = api
     end
@@ -693,7 +699,8 @@ local function find_target()
             local fx, fz = pos.x - cam_pos.x, pos.z - cam_pos.z
             local flat = math.sqrt(fx * fx + fz * fz)
             local in_front = flat < 0.05 or (fx * look.x + fz * look.z) / flat > -0.2
-            local ok = best_aim > 0.75 or (nearest <= 1.5 and best_aim > 0.6) or (flat < 1.0 and in_front)
+            local same_level = pos.y - 0.5 <= cam_pos.y and cam_pos.y <= pos.y + 2.2
+            local ok = best_aim > 0.75 or (nearest <= 1.5 and best_aim > 0.6) or (flat < 1.0 and in_front and same_level)
             local score = best_aim - nearest * 0.05
             if ok and score > best_score then
                 best_hp, best_score = hp, score

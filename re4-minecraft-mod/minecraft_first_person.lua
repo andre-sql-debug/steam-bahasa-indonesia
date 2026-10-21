@@ -381,7 +381,8 @@ local function update_look(cam_transform)
         c.look = { yaw = math.deg(math.pi - look.yaw), pitch = -math.deg(look.pitch), at = os.clock() }
     end
 
-    local target = key_is_down(0x10) and settings.sneak_eye_height or settings.eye_height
+    local sneaking = key_is_down(0x10) and not (type(c) == "table" and c.minecraft_screen)
+    local target = sneaking and settings.sneak_eye_height or settings.eye_height
     eye = eye and (eye + (target - eye) * 0.35) or target
 end
 

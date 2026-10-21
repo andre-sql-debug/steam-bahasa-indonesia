@@ -127,6 +127,8 @@ struct SharedFrame {
 
 SharedFrame g_shared;
 
+void release_input();
+
 // True while Minecraft streams its picture (RE4 is in control of Minecraft); set by the renderer
 volatile LONG g_minecraft_active = 0;
 // Which input RE4 gets while Minecraft is drawn: see "input to RE4" in the file layout above
@@ -480,9 +482,13 @@ struct Renderer {
     }
 
     void frame() {
-        if (failed) return;
+        if (failed) {
+            release_input();
+            return;
+        }
         if (!ready && !initialize()) {
             failed = true;
+            release_input();
             shutdown();
             log_error("disabled (could not initialize)");
             return;
@@ -513,6 +519,7 @@ struct Renderer {
         if (!ensure_texture(w, h)) {
             log_error("could not create the overlay texture");
             failed = true;
+            release_input();
             return;
         }
         if (!new_frame && !texture_has_frame) return;
@@ -606,6 +613,12 @@ volatile LONG64 g_wheel = 0;   // in WHEEL_DELTA units (120 per notch)
 volatile LONG g_left_down = 0;
 volatile LONG g_right_down = 0;
 
+// Without a working overlay nothing of Minecraft is shown: give RE4 all its input back
+void release_input() {
+    InterlockedExchange(&g_minecraft_active, 0);
+    InterlockedExchange(&g_minecraft_screen, 0);
+}
+
 // Keyboard events for Minecraft (its screens: inventory, creative search, chat; and its hotkeys), kept
 // in a small numbered log so Minecraft can pick up every event it hasn't seen yet. kind: 0 = key up,
 // 1 = key down, 2 = typed character, 3 = key repeat. code: the virtual key, or the character.
@@ -620,11 +633,27 @@ uint64_t g_key_seq = 0;
 SRWLOCK g_key_lock = SRWLOCK_INIT;
 bool g_raw_keyboard = false;   // RE4 gets raw keyboard input: use that, not the legacy key messages
 bool g_keys_down[256] = {};
+volatile LONG g_framework_menu = 0;   // REFramework's own menu is open: what's typed there isn't for Minecraft
+
+void push_key_event(int kind, unsigned code);
+
+// RE4 lost focus (Alt+Tab, Ctrl+Alt+Del): the key-ups won't arrive, so let go of everything now
+void release_all_keys() {
+    for (UINT vk = 0; vk < 256; ++vk) {
+        if (g_keys_down[vk]) {
+            g_keys_down[vk] = false;
+            push_key_event(0, vk);
+        }
+    }
+    if (g_left_down) { InterlockedIncrement64(&g_left_releases); InterlockedExchange(&g_left_down, 0); }
+    if (g_right_down) { InterlockedIncrement64(&g_right_releases); InterlockedExchange(&g_right_down, 0); }
+}
 
 void push_key_event(int kind, unsigned code) {
     AcquireSRWLockExclusive(&g_key_lock);
-    KeyEvent& e = g_key_log[g_key_seq % KEY_LOG];
-    e.seq = ++g_key_seq;
+    uint64_t seq = ++g_key_seq;
+    KeyEvent& e = g_key_log[seq % KEY_LOG];
+    e.seq = seq;
     e.kind = kind;
     e.code = code;
     ReleaseSRWLockExclusive(&g_key_lock);
@@ -639,13 +668,16 @@ void on_key(UINT vk, UINT scan, bool down) {
         push_key_event(0, vk);
         return;
     }
+    if (g_framework_menu) return;   // typing into REFramework's menu (releases above still go through)
     push_key_event(g_keys_down[vk] ? 3 : 1, vk);
     g_keys_down[vk] = true;
     BYTE state[256] = {};
     bool shift = g_keys_down[VK_SHIFT] || g_keys_down[VK_LSHIFT] || g_keys_down[VK_RSHIFT];
     bool ctrl = g_keys_down[VK_CONTROL] || g_keys_down[VK_LCONTROL] || g_keys_down[VK_RCONTROL];
+    bool alt = g_keys_down[VK_MENU] || g_keys_down[VK_LMENU] || g_keys_down[VK_RMENU];
     if (shift) state[VK_SHIFT] = 0x80;
     if (ctrl) state[VK_CONTROL] = 0x80;
+    if (alt) state[VK_MENU] = 0x80;   // Ctrl+Alt = AltGr: @ [ ] { } \ | ~ on many keyboard layouts
     if (GetKeyState(VK_CAPITAL) & 1) state[VK_CAPITAL] = 0x01;
     WCHAR chars[4] = {};
     // flag 4: don't change the keyboard's dead-key state (Windows 10 1607+)
@@ -676,10 +708,21 @@ bool raw_keyboard_input(long long lparam) {
            header.dwType == RIM_TYPEKEYBOARD;
 }
 
+// Keys whose press went to a Minecraft screen: their auto-repeats stay away from RE4 until released
+// (holding Esc to close Minecraft's inventory must not open RE4's pause menu afterwards)
+bool g_swallowed[256] = {};
+
 bool on_message(void* hwnd, unsigned int msg, unsigned long long wparam, long long lparam) {
+    if (msg == WM_KILLFOCUS || (msg == WM_ACTIVATEAPP && wparam == FALSE) ||
+        (msg == WM_ACTIVATE && LOWORD(wparam) == WA_INACTIVE)) {
+        release_all_keys();
+    }
+    InterlockedExchange(&g_framework_menu, (g_param != nullptr && g_param->functions->is_drawing_ui()) ? 1 : 0);
     // What this raw input is, for deciding below whether RE4 gets it
     bool raw_mouse = false, raw_release = false, raw_minecraft_key = false;
-    if (msg == WM_INPUT) {
+    UINT raw_vk = 0;
+    // Input that arrives while RE4 is in the background (typing in another window) is not for Minecraft
+    if (msg == WM_INPUT && GET_RAWINPUT_CODE_WPARAM(wparam) == RIM_INPUT) {
         RAWINPUT raw{};
         UINT size = sizeof(raw);
         bool got = GetRawInputData((HRAWINPUT)lparam, RID_INPUT, &raw, &size, sizeof(RAWINPUTHEADER)) != (UINT)-1;
@@ -687,6 +730,7 @@ bool on_message(void* hwnd, unsigned int msg, unsigned long long wparam, long lo
             const RAWKEYBOARD& k = raw.data.keyboard;
             raw_minecraft_key = is_minecraft_key(k.VKey);
             raw_release = (k.Flags & RI_KEY_BREAK) != 0;
+            raw_vk = k.VKey < 256 ? k.VKey : 0;
             if (k.VKey != 0xFF) {   // 0xFF: part of an escape sequence, not a key
                 g_raw_keyboard = true;
                 UINT vk = k.VKey;
@@ -743,10 +787,14 @@ bool on_message(void* hwnd, unsigned int msg, unsigned long long wparam, long lo
         switch (msg) {
         case WM_INPUT:
             if ((raw_mouse || raw_keyboard_input(lparam)) && !raw_release) {
+                if (raw_vk != 0) g_swallowed[raw_vk] = true;
                 return false;
             }
             break;
-        case WM_KEYDOWN: case WM_SYSKEYDOWN: case WM_CHAR: case WM_SYSCHAR:
+        case WM_KEYDOWN: case WM_SYSKEYDOWN:
+            if (wparam < 256) g_swallowed[wparam] = true;
+            return false;
+        case WM_CHAR: case WM_SYSCHAR:
         case WM_MOUSEMOVE: case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK:
         case WM_RBUTTONDOWN: case WM_RBUTTONDBLCLK:
         case WM_MBUTTONDOWN: case WM_MOUSEWHEEL: case WM_MOUSEHWHEEL:
@@ -757,6 +805,17 @@ bool on_message(void* hwnd, unsigned int msg, unsigned long long wparam, long lo
         }
         return true;
     }
+    // A key whose press a Minecraft screen took: its repeats stay with Minecraft, its release goes through
+    if (msg == WM_INPUT && raw_vk != 0 && g_swallowed[raw_vk]) {
+        if (raw_release) {
+            g_swallowed[raw_vk] = false;
+        } else {
+            return false;
+        }
+    }
+    if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && wparam < 256 && g_swallowed[wparam]) return false;
+    if ((msg == WM_KEYUP || msg == WM_SYSKEYUP) && wparam < 256) g_swallowed[wparam] = false;
+
     if (g_minecraft_active && g_input_to_re4 < 2 && !menu_open) {
         bool keys_to_re4 = g_input_to_re4 == 1;
         switch (msg) {
@@ -789,13 +848,13 @@ void write_mouse() {
     if (f == nullptr) return;
     fprintf(f, "{\"frame\":%llu,\"x\":%lld,\"y\":%lld,\"left_presses\":%lld,\"right_presses\":%lld,"
                "\"left_releases\":%lld,\"right_releases\":%lld,\"middle_presses\":%lld,\"middle_releases\":%lld,"
-               "\"wheel\":%lld,\"left\":%s,\"right\":%s,\"minecraft_has_mouse\":%s,",
+               "\"wheel\":%lld,\"left\":%s,\"right\":%s,\"minecraft_has_mouse\":%s,\"menu\":%s,",
             (unsigned long long)g_present_count, (long long)g_mouse_x, (long long)g_mouse_y,
             (long long)g_left_presses, (long long)g_right_presses,
             (long long)g_left_releases, (long long)g_right_releases,
             (long long)g_middle_presses, (long long)g_middle_releases, (long long)g_wheel,
             g_left_down ? "true" : "false", g_right_down ? "true" : "false",
-            g_minecraft_active ? "true" : "false");
+            g_minecraft_active ? "true" : "false", g_framework_menu ? "true" : "false");
     // The keyboard log: newest sequence number and the last events, oldest first
     AcquireSRWLockShared(&g_key_lock);
     uint64_t newest = g_key_seq;

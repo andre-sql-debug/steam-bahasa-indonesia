@@ -88,9 +88,11 @@ public final class Re4Input {
         long[] presses = {num(data, "left_presses"), num(data, "right_presses"), num(data, "middle_presses")};
         long[] releases = {num(data, "left_releases"), num(data, "right_releases"), num(data, "middle_releases")};
         boolean newer = keySeq >= lastKeySeq && presses[0] >= lastPresses[0];
+        boolean frameworkMenu = data.has("menu") && data.get("menu").getAsBoolean();
 
         // First read, the plugin restarted, or RE4 isn't driving Minecraft: just remember where things are
         if (!primed || !newer || !driving() || mc.player == null) {
+            releaseButtons(mc);
             primed = true;
             lastX = x;
             lastY = y;
@@ -104,8 +106,12 @@ public final class Re4Input {
         }
 
         long window = mc.getWindow().getWindow();
+        Screen before = mc.screen;
         replayKeys(mc, window, data.getAsJsonArray("kev"));
         lastKeySeq = keySeq;
+        if (mc.screen != before) {
+            releaseButtons(mc);   // a key closed or changed the screen
+        }
 
         MouseHandlerAccessor mouse = (MouseHandlerAccessor) mc.mouseHandler;
         long dx = x - lastX, dy = y - lastY, dWheel = wheel - lastWheel;
@@ -114,6 +120,13 @@ public final class Re4Input {
         lastWheel = wheel;
 
         Screen screen = mc.screen;
+        if (frameworkMenu) {
+            // REFramework's own menu has the mouse: its clicks are not for Minecraft
+            System.arraycopy(presses, 0, lastPresses, 0, 3);
+            System.arraycopy(releases, 0, lastReleases, 0, 3);
+            hadScreen = screen != null;
+            return;
+        }
         if (screen != null) {
             int width = mc.getWindow().getScreenWidth(), height = mc.getWindow().getScreenHeight();
             if (!hadScreen || cursorX < 0) {
@@ -137,6 +150,9 @@ public final class Re4Input {
                 long newReleases = releases[button] - lastReleases[button];
                 // A quick click can press and release between two reads: press first, then release
                 while (newPresses > 0 || newReleases > 0) {
+                    if (mc.screen != screen) {
+                        break;   // a click closed or changed the screen; the rest is not for the game world
+                    }
                     if (newPresses > 0 && (!buttonDown[button] || newReleases == 0)) {
                         mouse.re4bridge$onPress(window, button, 1, mods());
                         buttonDown[button] = true;
@@ -150,8 +166,11 @@ public final class Re4Input {
                     }
                 }
             }
-            if (dWheel != 0) {
+            if (dWheel != 0 && mc.screen == screen) {
                 mouse.re4bridge$onScroll(window, 0.0, dWheel / 120.0);
+            }
+            if (mc.screen != screen) {
+                releaseButtons(mc);
             }
         } else {
             buttonDown[0] = buttonDown[1] = buttonDown[2] = false;
@@ -215,10 +234,28 @@ public final class Re4Input {
             if (key < 0) {
                 continue;
             }
+            if (mc.options.keyFullscreen.matches(key, 0)) {
+                continue;   // Minecraft's window is hidden behind RE4: never make it fullscreen
+            }
             if (mc.screen != null || HOTKEYS.contains(key)) {
                 int action = kind == 0 ? 0 : (kind == 3 ? 2 : 1);   // GLFW release / press / repeat
                 mc.keyboardHandler.keyPress(window, key, 0, action, mods());
             }
+        }
+    }
+
+    // Let go of mouse buttons a screen still thinks are held (it lost focus, closed, or RE4 took over)
+    private static void releaseButtons(Minecraft mc) {
+        for (int button = 0; button < 3; button++) {
+            if (buttonDown[button] && mc.screen != null) {
+                try {
+                    mc.screen.mouseReleased(cursorX * mc.getWindow().getGuiScaledWidth() / mc.getWindow().getScreenWidth(),
+                            cursorY * mc.getWindow().getGuiScaledHeight() / mc.getWindow().getScreenHeight(), button);
+                } catch (RuntimeException e) {
+                    Re4Bridge.LOGGER.warn("RE4 Bridge: screen mouse release failed", e);
+                }
+            }
+            buttonDown[button] = false;
         }
     }
 
