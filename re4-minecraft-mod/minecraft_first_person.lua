@@ -253,10 +253,30 @@ local function get_screen_size()
     return 1920, 1080
 end
 
+-- While the overlay plugin shows Minecraft's own rendering, Minecraft draws the real crosshair
+local overlay_check_frame = 0
+local overlay_beat, overlay_beat_frame = nil, -100000
+local minecraft_crosshair = false
+
+local function update_overlay_state()
+    overlay_check_frame = overlay_check_frame + 1
+    if overlay_check_frame % 60 ~= 0 then return end
+    local ok_b, bridge = pcall(json.load_file, "minecraft_bridge.json")
+    local ok_p, plugin = pcall(json.load_file, "minecraft_overlay_plugin.json")
+    if ok_p and type(plugin) == "table" and plugin.beat ~= overlay_beat then
+        overlay_beat = plugin.beat
+        overlay_beat_frame = overlay_check_frame
+    end
+    minecraft_crosshair = ok_b and type(bridge) == "table" and bridge.overlay == true
+        and ok_p and type(plugin) == "table" and plugin.ready == true
+        and overlay_check_frame - overlay_beat_frame < 240
+end
+
 -- Minecraft-style "+" crosshair
 re.on_frame(function()
+    update_overlay_state()
     if not (settings.crosshair and settings.first_person) then return end
-    if head_joint == nil then return end
+    if head_joint == nil or minecraft_crosshair then return end
 
     local w, h = get_screen_size()
     local px = math.max(1, math.floor(h / 360))

@@ -13,9 +13,18 @@ Minecraft 1.21.1 + RE4 Bridge mod  <--reads--   RE4\reframework\data\minecraft_b
 
 ## Install / update (one click)
 Unzip, then double-click **`install.bat`**. It finds RE4 and your CurseForge Minecraft profile (asks if it
-can't), builds the Minecraft mod, replaces old versions, tells the mod where RE4 is, and copies the RE4
-scripts. Needs: REFramework in RE4, the Java 21 JDK, and a CurseForge profile with Minecraft 1.21.1 + Fabric.
-Close Minecraft before running it. The folders it found are remembered in `install-paths.txt`.
+can't), installs the ready-made Minecraft mod and RE4 overlay plugin from `prebuilt\` (replacing old
+versions), tells the mod where RE4 is, and copies the RE4 scripts. Needs: REFramework in RE4 and a
+CurseForge profile with Minecraft 1.21.1 + Fabric. Close Minecraft and RE4 before running it. The folders it
+found are remembered in `install-paths.txt`. (Without `prebuilt\`, it builds the mod and needs the Java 21 JDK.)
+
+## Live Minecraft overlay
+While RE4 is in control, Minecraft skips drawing its world and renders only its hand, held item and HUD
+on a see-through background, at RE4's half resolution with GUI scale 2 and 60 FPS. Each frame goes into
+`reframework\data\minecraft_overlay.bin` (two picture slots), and the `re4_minecraft_overlay.dll`
+REFramework plugin (`re4-overlay-plugin/`, built with MinGW-w64 via `build.sh`) draws it over RE4. So the
+HUD, held items, swing animations, item names and attack indicator are Minecraft's own. Keep the Minecraft
+window open behind RE4 (not minimized). The Lua HUD only draws its own copy when the plugin isn't running.
 
 ## RE4 side
 Requirements: RE4 Remake on PC (Steam) and [REFramework](https://github.com/praydog/REFramework-nightly/releases)
@@ -43,7 +52,7 @@ Copy the `.lua` files into `<RE4 game folder>\reframework\autorun\`. Settings: p
 A client-only Fabric mod for Minecraft Java **1.21.1**.
 
 1. Install a Java 21 JDK (e.g. Eclipse Temurin 21).
-2. Build: in `minecraft-bridge-mod`, run `gradlew.bat build` (Windows). The mod is `build\libs\re4bridge-0.4.2.jar`.
+2. Build: in `minecraft-bridge-mod`, run `gradlew.bat build` (Windows). The mod is `build\libs\re4bridge-0.5.0.jar`.
 3. Install Fabric Loader for 1.21.1 (Fabric installer, or a Fabric 1.21.1 profile in the CurseForge/Modrinth app)
    and put the jar in that profile's `mods` folder.
 4. Start Minecraft once. `config\re4bridge.txt` holds the path of the file it writes; change it if RE4 is

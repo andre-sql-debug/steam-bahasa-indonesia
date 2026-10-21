@@ -1,5 +1,6 @@
 # Installs or updates the RE4 Minecraft mod:
-# builds the Minecraft mod, puts it in your CurseForge profile, and copies the RE4 scripts.
+# puts the Minecraft mod in your CurseForge profile, and copies the RE4 scripts and overlay plugin.
+# Uses the ready-made files in prebuilt\ (no Java needed); builds the Minecraft mod only if they are missing.
 # Run it with install.bat (double-click). Folders it finds are remembered in install-paths.txt.
 
 $ErrorActionPreference = 'Stop'
@@ -75,7 +76,13 @@ while (-not $mods) {
 New-Item -ItemType Directory -Force -Path $mods | Out-Null
 Ok $mods
 
-# ---------------------------------------------------------------- Build the Minecraft mod
+# ---------------------------------------------------------------- Minecraft mod file
+$prebuilt = Join-Path $here 'prebuilt'
+$jar = Get-ChildItem $prebuilt -Filter 're4bridge-*.jar' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if ($jar) {
+    Step 'Using the ready-made Minecraft mod'
+    Ok $jar.Name
+} else {
 Step 'Building the Minecraft mod (first time takes a few minutes)'
 # The build uses JAVA_HOME if it is set, otherwise the java on the PATH
 $java = 'java'
@@ -99,6 +106,7 @@ $jar = Get-ChildItem (Join-Path $modDir 'build\libs') -Filter 're4bridge-*.jar' 
     Where-Object { $_.Name -notmatch 'sources' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if (-not $jar) { Fail 'The build finished but no mod file was made.' }
 Ok $jar.Name
+}
 
 # ---------------------------------------------------------------- Install the Minecraft mod
 Step 'Installing the Minecraft mod'
@@ -135,8 +143,25 @@ foreach ($s in $scripts) {
     Ok $s.Name
 }
 
+# ---------------------------------------------------------------- RE4 overlay plugin
+Step 'Installing the RE4 overlay plugin (shows Minecraft''s own hand, items and HUD in RE4)'
+$plugins = Join-Path $re4 'reframework\plugins'
+New-Item -ItemType Directory -Force -Path $plugins | Out-Null
+$dll = Join-Path $prebuilt 're4_minecraft_overlay.dll'
+if (Test-Path $dll) {
+    try {
+        Copy-Item $dll $plugins -Force
+    } catch {
+        Fail 'Could not replace the overlay plugin. Close RE4 first, then run this again.'
+    }
+    Ok "re4_minecraft_overlay.dll -> $plugins"
+} else {
+    Write-Host '   prebuilt\re4_minecraft_overlay.dll is missing; skipping the overlay plugin' -ForegroundColor Yellow
+}
+
 Set-Content -Path $pathsFile -Encoding ASCII -Value @("re4=$re4", "mods=$mods")
 
 Write-Host ''
 Write-Host 'All done! Start Minecraft (RE4 profile, Superflat world), then RE4.' -ForegroundColor Green
+Write-Host 'Keep the Minecraft window open behind RE4 (not minimized): it draws the hand and HUD you see in RE4.'
 Write-Host 'If RE4 was already running: Insert > ScriptRunner > Reset scripts.'

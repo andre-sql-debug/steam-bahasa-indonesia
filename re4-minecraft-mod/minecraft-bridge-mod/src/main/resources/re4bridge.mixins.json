@@ -3,7 +3,9 @@
   "package": "dev.re4bridge.mixin",
   "compatibilityLevel": "JAVA_21",
   "client": [
+    "GameRendererMixin",
     "KeyboardInputMixin",
+    "LevelRendererMixin",
     "MinecraftMixin"
   ],
   "injectors": {

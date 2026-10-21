@@ -933,6 +933,31 @@ local function draw_gui_picker()
     imgui.tree_pop()
 end
 
+------------------------------------------------------------------------------
+-- Live Minecraft overlay: when the re4_minecraft_overlay.dll plugin shows Minecraft's own
+-- rendering (hand, item, HUD), this script doesn't draw its copies
+------------------------------------------------------------------------------
+
+local PLUGIN_STATUS_FILE = "minecraft_overlay_plugin.json"
+local plugin_beat = nil
+local plugin_beat_frame = -100000
+local plugin_ready = false
+
+local function update_plugin_status()
+    if frame % 60 ~= 0 then return end
+    local ok, d = pcall(json.load_file, PLUGIN_STATUS_FILE)
+    if not ok or type(d) ~= "table" then return end
+    if d.beat ~= plugin_beat then
+        plugin_beat = d.beat
+        plugin_beat_frame = frame
+    end
+    plugin_ready = d.ready == true
+end
+
+local function minecraft_draws_ui()
+    return data ~= nil and data.overlay == true and plugin_ready and frame - plugin_beat_frame < 240
+end
+
 local function get_screen_size()
     local ok, size = pcall(imgui.get_display_size)
     if ok and size ~= nil and size.x > 0 then
@@ -951,6 +976,7 @@ re.on_frame(function()
         load_textures()
     end
     update_ui_toggle()
+    update_plugin_status()
 
     if not settings.enabled then return end
 
@@ -971,6 +997,7 @@ re.on_frame(function()
     if settings.send_input then
         update_input()
     end
+    if minecraft_draws_ui() then return end
 
     -- Show the slot picked in RE4 right away, before Minecraft confirms it
     local selected = data.selected
@@ -1013,6 +1040,7 @@ re.on_draw_ui(function()
             draw_gui_picker()
         end
         imgui.text(is_connected() and "Minecraft: connected" or "Minecraft: not connected (showing Leon's health)")
+        imgui.text(minecraft_draws_ui() and "UI: live from Minecraft (overlay plugin)" or "UI: drawn by this script")
         changed, settings.show_debug = imgui.checkbox("Show debug info", settings.show_debug)
         if settings.show_debug then
             imgui.text("Data file: reframework\\data\\" .. BRIDGE_FILE)

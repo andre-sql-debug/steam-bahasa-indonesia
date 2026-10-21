@@ -6,6 +6,7 @@ import com.google.gson.JsonParser;
 import com.mojang.blaze3d.platform.NativeImage;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.client.GraphicsStatus;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
@@ -20,6 +21,7 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
+import org.lwjgl.glfw.GLFW;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -43,6 +45,8 @@ import java.util.Optional;
  * - minecraft_textures.json (written here, when new items show up): item textures for the HUD.
  * - minecraft_bridge_input.json (written by RE4): keys, look direction, hotbar slot, clicks.
  * - minecraft_bridge_sync.json (written by RE4): where Leon is, to keep both players lined up.
+ * - minecraft_overlay.bin (written here, every frame): Minecraft's hand, item and HUD for the RE4 plugin.
+ * - minecraft_overlay_plugin.json (written by the RE4 plugin): RE4's screen size.
  * Minecraft's own code does movement, attacks, placing and breaking; RE4 shows the results.
  */
 public class Re4Bridge implements ClientModInitializer {
@@ -94,6 +98,14 @@ public class Re4Bridge implements ClientModInitializer {
     private static long texturesVersion = 0;
     private static JsonObject guiImages = null;
 
+    // Overlay mode: while RE4 is in control, Minecraft draws only its hand, item and HUD for RE4
+    private static boolean overlayActive = false;
+    private static GraphicsStatus savedGraphics = null;
+    private static Integer savedGuiScale = null;
+    private static Integer savedFramerate = null;
+    private static final int OVERLAY_FPS = 60;
+    private static Path pluginStatusFile;
+
     // Minecraft's own HUD images (1.21 sprite names) and its pixel font, so RE4 can draw the exact same UI
     private static final String[] GUI_IMAGES = {
             "gui/sprites/hud/hotbar", "gui/sprites/hud/hotbar_selection",
@@ -116,7 +128,89 @@ public class Re4Bridge implements ClientModInitializer {
         syncFile = outputFile.resolveSibling("minecraft_bridge_sync.json");
         blocksFile = outputFile.resolveSibling("minecraft_blocks.json");
         texturesFile = outputFile.resolveSibling("minecraft_textures.json");
+        pluginStatusFile = outputFile.resolveSibling("minecraft_overlay_plugin.json");
+        try {
+            Files.createDirectories(outputFile.getParent());
+        } catch (IOException e) {
+            LOGGER.warn("RE4 Bridge: could not create {}", outputFile.getParent(), e);
+        }
+        OverlayStreamer.open(outputFile.resolveSibling("minecraft_overlay.bin"));
         LOGGER.info("RE4 Bridge: writing HUD data to {}, reading input from {}", outputFile, inputFile);
+    }
+
+    public static boolean overlayActive() {
+        return overlayActive;
+    }
+
+    /** End of a rendered frame: send the picture to RE4 while in overlay mode. */
+    public static void onFrameRendered(Minecraft mc) {
+        if (overlayActive && mc.level != null) {
+            try {
+                OverlayStreamer.capture(mc);
+            } catch (Exception e) {
+                warnOnce("could not capture the frame", e);
+            }
+        }
+    }
+
+    // Overlay mode on/off follows whether RE4 is in control
+    private static void updateOverlayMode(Minecraft mc) {
+        boolean want = remoteKeys() != null && mc.player != null;
+        if (want == overlayActive) {
+            return;
+        }
+        overlayActive = want;
+        if (want) {
+            enterOverlayMode(mc);
+        } else {
+            exitOverlayMode(mc);
+        }
+        OverlayStreamer.setActive(want);
+    }
+
+    private static void enterOverlayMode(Minecraft mc) {
+        // Fast graphics: Fancy draws a dark vignette over the whole screen, which would darken RE4
+        savedGraphics = mc.options.graphicsMode().get();
+        mc.options.graphicsMode().set(GraphicsStatus.FAST);
+
+        // Drawing only a hand and a HUD is so cheap Minecraft would run at hundreds of FPS; RE4 needs 60
+        savedFramerate = mc.options.framerateLimit().get();
+        mc.options.framerateLimit().set(OVERLAY_FPS);
+
+        // Half of RE4's screen size with GUI scale 2 = Minecraft's normal look, scaled up sharply 2x
+        int width = 960;
+        int height = 540;
+        JsonObject status = readJson(pluginStatusFile);
+        if (status != null && status.has("width") && status.has("height")) {
+            int w = status.get("width").getAsInt() / 2;
+            int h = status.get("height").getAsInt() / 2;
+            if (w >= 320 && h >= 240 && w <= 1920 && h <= 1080) {
+                width = w;
+                height = h;
+            }
+        }
+        if (mc.getWindow().isFullscreen()) {
+            mc.getWindow().toggleFullScreen();
+        }
+        GLFW.glfwSetWindowSize(mc.getWindow().getWindow(), width, height);
+        savedGuiScale = mc.options.guiScale().get();
+        mc.options.guiScale().set(2);
+        mc.resizeDisplay();
+        LOGGER.info("RE4 Bridge: overlay mode on ({}x{})", width, height);
+    }
+
+    private static void exitOverlayMode(Minecraft mc) {
+        if (savedGraphics != null) {
+            mc.options.graphicsMode().set(savedGraphics);
+        }
+        if (savedGuiScale != null) {
+            mc.options.guiScale().set(savedGuiScale);
+        }
+        if (savedFramerate != null) {
+            mc.options.framerateLimit().set(savedFramerate);
+        }
+        mc.resizeDisplay();
+        LOGGER.info("RE4 Bridge: overlay mode off");
     }
 
     /** The keys RE4 is holding, or null when RE4 isn't in control (then the keyboard works as usual). */
@@ -166,6 +260,7 @@ public class Re4Bridge implements ClientModInitializer {
             applyInput(mc);
             applySync(mc);
             continueDestroying(mc);
+            updateOverlayMode(mc);
         } catch (Exception e) {
             warnOnce("could not apply RE4 input", e);
         }
@@ -421,6 +516,7 @@ public class Re4Bridge implements ClientModInitializer {
         state.addProperty("selected", player.getInventory().selected);
         state.addProperty("game_mode", mc.gameMode != null ? mc.gameMode.getPlayerMode().getName() : "unknown");
         state.addProperty("re4_control", remoteKeys() != null);
+        state.addProperty("overlay", overlayActive);
         state.addProperty("blocks_version", blocksVersion);
         state.addProperty("textures_version", texturesVersion);
 
