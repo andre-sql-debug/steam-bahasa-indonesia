@@ -13,7 +13,7 @@ final class Re4NativeFiles {
     static final String TEX_VERSION = Integer.toString(ReTexWriter.FILE_VERSION);
     static final String MDF_VERSION = Integer.toString(ReMdfWriter.FILE_VERSION);
     // Part of every file name: a corrected writer makes new names, so RE4 never keeps an old copy cached
-    static final int FORMAT_REV = 2;
+    static final int FORMAT_REV = 3;
     // Mips narrower than this are left out: their row padding differs between tools (RE4 doesn't need them)
     private static final int SMALLEST_MIP = 64;
     // Pixels at least this opaque are drawn (Minecraft's cut-out entity textures are 0 or 255)
@@ -29,7 +29,8 @@ final class Re4NativeFiles {
     /** positions/normals/uvs as made by Re4Native's geometry capture (both windings already in). */
     static byte[] mesh(String material, float[] positions, float[] normals, float[] uvs) {
         int[] indices = Re4Native.indicesFor(positions.length / 3);
-        return ReMeshWriter.toBytes(material, positions, normals, uvs, indices);
+        // The shadow LOD shares the model (like RE4's own meshes that cast shadows), so the mob casts RE4 shadows
+        return ReMeshWriter.toBytes(material, positions, normals, uvs, indices, new ReMeshWriter.Options().shadowLod(true));
     }
 
     /** image: width, height, then RGBA pixels (Re4Native's texture readers). Scaled up to about maxSize, sharply. */

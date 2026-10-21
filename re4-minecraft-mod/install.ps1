@@ -159,6 +159,63 @@ if (Test-Path $dll) {
     Write-Host '   prebuilt\re4_minecraft_overlay.dll is missing; skipping the overlay plugin' -ForegroundColor Yellow
 }
 
+# ---------------------------------------------------------------- Real RE4 mobs (REFramework's Loose File Loader)
+# The mod writes the mobs' models into natives\STM\minecraft; RE4 only reads loose files there when REFramework's
+# Loose File Loader is on. Its setting lives in re2_fw_config.txt: key=value lines, exact and case-sensitive,
+# rewritten by REFramework while RE4 runs, so it is only edited while RE4 is closed.
+Step 'Letting RE4 load the Minecraft mobs (REFramework Loose File Loader)'
+function Enable-LooseFileLoader($gameDir) {
+    $key = 'LooseFileLoader_Enabled'
+    $latin1 = [System.Text.Encoding]::GetEncoding(28591)   # bytes 0-255 one-to-one, so other lines stay as they are
+    $targets = @(Join-Path $gameDir 're2_fw_config.txt')
+    if ($env:APPDATA) {
+        # REFramework keeps its settings here instead when the game folder is not writable
+        $fallback = Join-Path $env:APPDATA 'REFramework\re4\re2_fw_config.txt'
+        if (Test-Path -LiteralPath $fallback) { $targets += $fallback }
+    }
+    foreach ($cfg in $targets) {
+        $lines = @()
+        if (Test-Path -LiteralPath $cfg) {
+            $text = $latin1.GetString([System.IO.File]::ReadAllBytes($cfg))
+            # A byte-order mark (left by another editor) would hide the first setting from REFramework
+            $bom = [string][char]0xEF + [char]0xBB + [char]0xBF
+            if ($text.StartsWith($bom, [System.StringComparison]::Ordinal)) { $text = $text.Substring(3) }
+            $lines = @($text -split "`r?`n" | Where-Object { $_ -ne '' })
+        }
+        $found = $false
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            $eq = $lines[$i].IndexOf('=')
+            if ($eq -ge 0 -and $lines[$i].Substring(0, $eq) -ceq $key) {
+                $found = $true
+                $lines[$i] = "$key=true"
+            }
+        }
+        if (-not $found) { $lines += "$key=true" }
+        $newBytes = $latin1.GetBytes(($lines -join "`r`n") + "`r`n")
+        $same = (Test-Path -LiteralPath $cfg) -and
+            ([System.Convert]::ToBase64String([System.IO.File]::ReadAllBytes($cfg)) -ceq [System.Convert]::ToBase64String($newBytes))
+        if ($same) {
+            Ok "already on ($cfg)"
+        } else {
+            if (Test-Path -LiteralPath $cfg) { Copy-Item -LiteralPath $cfg -Destination "$cfg.bak" -Force }
+            [System.IO.File]::WriteAllBytes($cfg, $newBytes)
+            Ok "turned on ($cfg)"
+        }
+    }
+}
+if (Get-Process -Name 're4' -ErrorAction SilentlyContinue) {
+    Write-Host '   RE4 is running, so this was skipped (REFramework would undo it when RE4 closes).' -ForegroundColor Yellow
+    Write-Host '   Close RE4 and run install.bat again to use real RE4 mobs.' -ForegroundColor Yellow
+} else {
+    try {
+        Enable-LooseFileLoader $re4
+    } catch {
+        Write-Host "   Could not change REFramework's settings: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host '   Real RE4 mobs need it: in RE4 press Insert > Loose File Loader > Enable, then restart RE4.' -ForegroundColor Yellow
+    }
+}
+New-Item -ItemType Directory -Force -Path (Join-Path $re4 'natives\STM\minecraft') | Out-Null
+
 Set-Content -Path $pathsFile -Encoding ASCII -Value @("re4=$re4", "mods=$mods")
 
 Write-Host ''

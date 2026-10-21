@@ -47,6 +47,20 @@ Minecraft's things sit in RE4's world: they are drawn from RE4's own camera of e
 they stay exactly in place when you turn or move; RE4's floors and walls hide them like they hide anything
 in RE4; and mobs, your character, dropped items and lit TNT cast Minecraft's soft round shadow on RE4's floor.
 
+**Real RE4 mobs** (experimental, setting **Minecraft Real Mobs → Real RE4 mobs**): Minecraft's mobs become
+real RE4 objects, lit, shadowed and hidden by RE4's renderer like its own models (the way SkyCraft puts
+Minecraft into Skyrim). The Minecraft mod turns each body part it draws (its model and texture) into RE4's
+own file formats (`.mesh`, `.tex`, `.mdf2`) in `natives\STM\minecraft`, once per part; every frame it sends
+each part's position, rotation and size, `minecraft_native.lua` places RE4 objects with those models there,
+and Minecraft stops drawing the parts RE4 shows (it still draws a part while the mob flashes red after a
+hit, and anything RE4 can't show). Pixel-art textures are scaled up sharply, and see-through pixels are cut
+out. Needs REFramework's **Loose File Loader** (`install.bat` turns it on).
+
+**Hearts and death**: RE4's hits on Leon cost the Minecraft player hearts (Leon keeps full health in RE4),
+and when either dies the other does too (settings: **RE4's hits cost Minecraft hearts**, **Shared death**).
+In Creative mode the Minecraft player takes no damage. If RE4 closes, Minecraft's player is held in place and
+after 10 seconds moved back to the world spawn, so it doesn't fall out of the sky.
+
 ```
 Minecraft 1.21.1 + RE4 Bridge mod  --writes-->  RE4\reframework\data\minecraft_bridge.json        --read by-->  minecraft_bridge_hud.lua
 Minecraft 1.21.1 + RE4 Bridge mod  <--reads--   RE4\reframework\data\minecraft_bridge_input.json  <--writes--  minecraft_bridge_hud.lua
@@ -55,9 +69,14 @@ Minecraft 1.21.1 + RE4 Bridge mod  <--reads--   RE4\reframework\data\minecraft_b
 ## Install / update (one click)
 Unzip, then double-click **`install.bat`**. It finds RE4 and your CurseForge Minecraft profile (asks if it
 can't), installs the ready-made Minecraft mod and RE4 overlay plugin from `prebuilt\` (replacing old
-versions), tells the mod where RE4 is, and copies the RE4 scripts. Needs: REFramework in RE4 and a
+versions), tells the mod where RE4 is, copies the RE4 scripts, and turns on REFramework's Loose File Loader
+for the real RE4 mobs (in `re2_fw_config.txt`, keeping a `.bak`). Needs: REFramework in RE4 and a
 CurseForge profile with Minecraft 1.21.1 + Fabric. Close Minecraft and RE4 before running it. The folders it
 found are remembered in `install-paths.txt`. (Without `prebuilt\`, it builds the mod and needs the Java 21 JDK.)
+
+**`uninstall.bat`** removes everything the mod added: the Minecraft mod and its setting, the RE4 scripts,
+the overlay plugin, the mobs' model files and the mod's files in `reframework\data`. Minecraft worlds stay;
+the Loose File Loader stays on (turn it off in RE4: **Insert → Loose File Loader**).
 
 ## Live Minecraft overlay
 While RE4 is in control, Minecraft skips drawing its own world and renders only its things (your blocks,
@@ -118,7 +137,9 @@ Copy the `.lua` files into `<RE4 game folder>\reframework\autorun\`. Settings: p
   Debug: Script Generated UI → Minecraft Terrain.
 - `minecraft_gameplay.lua`: copies the Minecraft player's movement (walking, sprinting, sneaking, jumping,
   Creative flying) to Leon and applies Minecraft's attack damage (cooldown, crits) to the enemy in front of
-  you. Without Minecraft it falls back to built-in Minecraft movement numbers. Also: no damage for Leon.
+  you. Without Minecraft it falls back to built-in Minecraft movement numbers. Also: hearts and shared
+  death (see above), flinching, and enemies looking at the mobs fighting them.
+- `minecraft_native.lua`: real RE4 mobs (see above). Status and errors: Script Generated UI → Minecraft Real Mobs.
 - `minecraft_blocks.lua`: shows the blocks you build in Minecraft as 3D cubes in RE4. **Right-click** places
   (Minecraft's own "use"), **left-click** breaks (Minecraft's mining). Minecraft's player looks where Leon
   looks, and is pulled back next to Leon when RE4 walls stop him. **F9** re-anchors the two worlds.

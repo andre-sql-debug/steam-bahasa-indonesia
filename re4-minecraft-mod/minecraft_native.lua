@@ -307,6 +307,10 @@ re.on_draw_ui(function()
     imgui.text("Needs REFramework's LooseFileLoader enabled (Insert -> LooseFileLoader).")
     imgui.text(string.format("Status: %s | parts loaded %d, failed %d | shown %d, kept %d",
         debug.status, debug.loaded, debug.failed, debug.shown, debug.pooled))
+    if debug.failed > 0 and debug.loaded == 0 then
+        imgui.text("RE4 can't open the mob files: turn on Insert -> LooseFileLoader (or run install.bat with RE4")
+        imgui.text("closed), then restart RE4. Minecraft keeps drawing the mobs meanwhile.")
+    end
     changed, settings.show_debug = imgui.checkbox("Show errors", settings.show_debug)
     if settings.show_debug then
         for _, e in ipairs(debug.errors) do imgui.text("  " .. e) end
