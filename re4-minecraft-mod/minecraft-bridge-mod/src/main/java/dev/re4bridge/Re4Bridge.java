@@ -6,6 +6,7 @@ import com.google.gson.JsonParser;
 import com.mojang.blaze3d.platform.NativeImage;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.client.CameraType;
 import net.minecraft.client.GraphicsStatus;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
@@ -19,7 +20,9 @@ import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.item.CrossbowItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.HitResult;
 import org.lwjgl.glfw.GLFW;
 import org.slf4j.Logger;
@@ -47,6 +50,8 @@ import java.util.Optional;
  * - minecraft_bridge_sync.json (written by RE4): where Leon is, to keep both players lined up.
  * - minecraft_overlay.bin (written here, every frame): Minecraft's hand, item and HUD for the RE4 plugin.
  * - minecraft_overlay_plugin.json (written by the RE4 plugin): RE4's screen size.
+ * - minecraft_terrain.json (written by RE4): RE4's ground and walls around Leon, which Minecraft's player
+ *   walks on (Re4Terrain), and requests for a new anchor between the two worlds.
  * Minecraft's own code does movement, attacks, placing and breaking; RE4 shows the results.
  */
 public class Re4Bridge implements ClientModInitializer {
@@ -79,6 +84,11 @@ public class Re4Bridge implements ClientModInitializer {
     private static int lastInputSelected = -1;
     private static int lastInputSwings = -1;
     private static int lastInputUses = -1;
+    private static int lastInputPerspective = -1;
+
+    // Written by the renderer mixins, sent to RE4 so its camera matches Minecraft's
+    public static volatile double worldFov = 70.0;
+    public static volatile float cameraDistance = 4.0F;
     private static RemoteKeys keys = null;
     private static Float remoteYaw = null;
     private static Float remotePitch = null;
@@ -105,6 +115,10 @@ public class Re4Bridge implements ClientModInitializer {
     private static Integer savedFramerate = null;
     private static final int OVERLAY_FPS = 60;
     private static Path pluginStatusFile;
+    private static Path terrainFile;
+    private static long lastTerrainSeq = -1;
+    // Minecraft's player is moved this high when anchored, above anything in its own world
+    private static final double ANCHOR_Y = 250.0;
 
     // Minecraft's own HUD images (1.21 sprite names) and its pixel font, so RE4 can draw the exact same UI
     private static final String[] GUI_IMAGES = {
@@ -129,6 +143,7 @@ public class Re4Bridge implements ClientModInitializer {
         blocksFile = outputFile.resolveSibling("minecraft_blocks.json");
         texturesFile = outputFile.resolveSibling("minecraft_textures.json");
         pluginStatusFile = outputFile.resolveSibling("minecraft_overlay_plugin.json");
+        terrainFile = outputFile.resolveSibling("minecraft_terrain.json");
         try {
             Files.createDirectories(outputFile.getParent());
         } catch (IOException e) {
@@ -258,7 +273,10 @@ public class Re4Bridge implements ClientModInitializer {
         }
         try {
             applyInput(mc);
-            applySync(mc);
+            handleTerrain(mc);
+            if (!Re4Terrain.enforced()) {
+                applySync(mc);
+            }
             continueDestroying(mc);
             updateOverlayMode(mc);
         } catch (Exception e) {
@@ -309,9 +327,18 @@ public class Re4Bridge implements ClientModInitializer {
         }
     }
 
+    // Files left over from an earlier session must not count as RE4 being in control
+    private static boolean isFresh(Path file) {
+        try {
+            return System.currentTimeMillis() - Files.getLastModifiedTime(file).toMillis() < REMOTE_TIMEOUT_MS;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
     private static void applyInput(Minecraft mc) {
         LocalPlayer player = mc.player;
-        if (player == null) {
+        if (player == null || !isFresh(inputFile)) {
             return;
         }
         JsonObject input = readJson(inputFile);
@@ -368,6 +395,13 @@ public class Re4Bridge implements ClientModInitializer {
                 }
                 lastInputUses = uses;
             }
+            if (input.has("perspective")) {
+                int perspective = input.get("perspective").getAsInt();
+                if (perspective > lastInputPerspective && !firstRead) {
+                    togglePerspective(mc);
+                }
+                lastInputPerspective = perspective;
+            }
         }
 
         RemoteKeys remote = remoteKeys();
@@ -386,6 +420,54 @@ public class Re4Bridge implements ClientModInitializer {
         if (remote.sprint && remote.forward && !remote.sneak) {
             player.setSprinting(true);
         }
+    }
+
+    // RE4's terrain: new anchors on request, new terrain snapshots as they arrive
+    private static void handleTerrain(Minecraft mc) {
+        LocalPlayer player = mc.player;
+        if (player == null) {
+            return;
+        }
+        boolean control = remoteKeys() != null;
+        JsonObject terrain = isFresh(terrainFile) ? readJson(terrainFile) : null;
+        if (terrain != null) {
+            long request = terrain.has("request_epoch") ? terrain.get("request_epoch").getAsLong() : 0;
+            if (control && request != 0 && request != Re4Terrain.anchorEpoch()) {
+                anchorAt(mc, player, request);
+            }
+            long seq = terrain.has("seq") ? terrain.get("seq").getAsLong() : -1;
+            if (seq != lastTerrainSeq) {
+                lastTerrainSeq = seq;
+                try {
+                    Re4Terrain.load(terrain);
+                } catch (RuntimeException e) {
+                    warnOnce("bad terrain message", e);
+                }
+            }
+        }
+        Re4Terrain.setEnforced(control);
+    }
+
+    private static void anchorAt(Minecraft mc, LocalPlayer player, long epoch) {
+        double x = player.getX();
+        double z = player.getZ();
+        player.setPos(x, ANCHOR_Y, z);
+        player.setDeltaMovement(Vec3.ZERO);
+        player.resetFallDistance();
+        var server = mc.getSingleplayerServer();
+        if (server != null) {
+            var uuid = player.getUUID();
+            server.execute(() -> {
+                ServerPlayer serverPlayer = server.getPlayerList().getPlayer(uuid);
+                if (serverPlayer != null) {
+                    serverPlayer.teleportTo(x, ANCHOR_Y, z);
+                    serverPlayer.resetFallDistance();
+                }
+            });
+        }
+        Re4Terrain.setAnchor(epoch, x, ANCHOR_Y, z);
+        lastTerrainSeq = -1;
+        LOGGER.info("RE4 Bridge: anchored epoch {} at {} {} {}", epoch, x, ANCHOR_Y, z);
     }
 
     // RE4's walls can stop Leon while Minecraft's player keeps walking; move it back next to Leon
@@ -496,6 +578,16 @@ public class Re4Bridge implements ClientModInitializer {
         player.resetAttackStrengthTicker();
     }
 
+    // What F5 does in Minecraft: first person -> behind -> in front
+    private static void togglePerspective(Minecraft mc) {
+        CameraType before = mc.options.getCameraType();
+        mc.options.setCameraType(before.cycle());
+        if (before.isFirstPerson() != mc.options.getCameraType().isFirstPerson()) {
+            mc.gameRenderer.checkEntityPostEffect(mc.options.getCameraType().isFirstPerson() ? mc.getCameraEntity() : null);
+        }
+        mc.levelRenderer.needsUpdate();
+    }
+
     private static JsonObject buildState(Minecraft mc) {
         JsonObject state = new JsonObject();
         state.addProperty("seq", ++seq);
@@ -554,6 +646,28 @@ public class Re4Bridge implements ClientModInitializer {
         }
 
         state.add("move", describeMovement(player));
+
+        // Camera: 0 = first person, 1 = third person behind, 2 = third person in front
+        JsonObject camera = new JsonObject();
+        CameraType cameraType = mc.options.getCameraType();
+        camera.addProperty("mode", cameraType.ordinal());
+        camera.addProperty("distance", cameraType.isFirstPerson() ? 0.0F : cameraDistance);
+        camera.addProperty("fov", worldFov);
+        state.add("camera", camera);
+
+        // Terrain: the anchor between the worlds, and whether Minecraft's player walks on fresh RE4 terrain
+        JsonObject anchor = new JsonObject();
+        double[] a = Re4Terrain.anchor();
+        anchor.addProperty("epoch", Re4Terrain.anchorEpoch());
+        anchor.addProperty("x", a[0]);
+        anchor.addProperty("y", a[1]);
+        anchor.addProperty("z", a[2]);
+        state.add("anchor", anchor);
+        // Covered = fresh terrain around the player, and the player is at the terrain's height (not fallen away)
+        boolean covered = Re4Terrain.covers(player.getX(), player.getZ())
+                && Math.abs(player.getY() - a[1]) < 64.0;
+        state.addProperty("terrain_boxes", Re4Terrain.boxCount());
+        state.addProperty("authority", Re4Terrain.enforced() && covered);
 
         JsonObject attack = new JsonObject();
         attack.addProperty("seq", attackSeq);

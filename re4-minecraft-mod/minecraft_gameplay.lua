@@ -349,6 +349,13 @@ local function predicted_velocity(keys, forward, right, dt)
 end
 
 local function update_from_minecraft(player, dt)
+    -- minecraft_terrain.lua is moving Leon with Minecraft's physics on RE4's terrain: hands off
+    if bridge.authority == true then
+        set_vertical(player, nil)
+        state.velocity = Vector3f.new(0, 0, 0)
+        debug.movement = "Minecraft physics on RE4 terrain (minecraft_terrain.lua)"
+        return
+    end
     local move = bridge.move
     local forward, right = camera_vectors()
     if forward == nil then

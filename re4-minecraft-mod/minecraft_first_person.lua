@@ -3,7 +3,10 @@
 -- sneaking), turned only by the mouse with Minecraft's sensitivity formula (needs the overlay plugin,
 -- which reads the raw mouse; without it RE4's own camera rotation is used). Also draws a "+" crosshair
 -- when Minecraft isn't drawing its own.
--- Press F5 to switch between first person and the normal RE4 camera.
+-- F5 works like Minecraft's F5 while Minecraft is connected: first person -> behind -> in front, and
+-- the third-person views show your Minecraft character (drawn by Minecraft) instead of Leon. RE4's
+-- camera is put exactly where Minecraft's camera is, with Minecraft's field of view, so they line up.
+-- Without Minecraft, F5 switches between first person and the normal RE4 camera.
 -- Install: copy this file to <RE4 folder>\reframework\autorun\
 -- Settings: press Insert -> Script Generated UI -> Minecraft First Person
 
@@ -16,6 +19,7 @@ local settings = {
     up_offset = 0.05,       -- only for the head bone camera
     hide_head = true,       -- hides all of Leon (body, separate head, hair, weapons): like Minecraft, you only see its hand
     crosshair = true,
+    minecraft_fov = true,   -- use Minecraft's field of view (and its sprint zoom) for RE4's camera
     stage = 1,              -- index into STAGES
     show_debug = false,
 }
@@ -38,6 +42,7 @@ local debug = {
     joints = "",
     parts = "",
     look = "not started",
+    fov = "RE4's own",
 }
 
 local head_joint = nil
@@ -233,15 +238,6 @@ local function list_parts()
     debug.parts = #names > 0 and table.concat(names, "\n") or "no child objects"
 end
 
-local function update_toggle_key()
-    local ok, down = pcall(function() return reframework:is_key_down(KEY_F5) end)
-    if not ok then return end
-    if down and not f5_was_down then
-        settings.first_person = not settings.first_person
-    end
-    f5_was_down = down
-end
-
 ------------------------------------------------------------------------------
 -- Minecraft mouse look (raw mouse from the overlay plugin) and eye height
 ------------------------------------------------------------------------------
@@ -252,6 +248,50 @@ local look = { yaw = nil, pitch = nil }   -- radians; yaw 0 = looking down -Z, p
 local frame_counter = 0
 local eye = nil
 local bridge_settings = { sensitivity = 0.5, invert = false, sneaking = false }
+
+-- Minecraft's camera (from minecraft_bridge.json): 0 = first person, 1 = behind, 2 = in front
+local mc_camera = { mode = 0, distance = 0, fov = nil }
+local bridge_seq, bridge_live_until = nil, -1
+local re4_fov = nil   -- RE4's own camera settings, put back when Minecraft's FOV is no longer used
+
+local function read_bridge()
+    local ok, b = pcall(json.load_file, "minecraft_bridge.json")
+    if not ok or type(b) ~= "table" then return end
+    if type(b.sensitivity) == "number" then bridge_settings.sensitivity = b.sensitivity end
+    bridge_settings.invert = b.invert_mouse == true
+    if b.seq ~= bridge_seq then
+        bridge_seq = b.seq
+        if b.re4_control == true and b.in_world == true then bridge_live_until = frame_counter + 120 end
+    end
+    local c = b.camera
+    if type(c) == "table" then
+        mc_camera.mode = tonumber(c.mode) or 0
+        mc_camera.distance = tonumber(c.distance) or 0
+        mc_camera.fov = tonumber(c.fov)
+    end
+end
+
+-- Minecraft is running and takes RE4's input (so it also follows F5)
+local function minecraft_live()
+    return frame_counter <= bridge_live_until
+end
+
+local function minecraft_view_mode()
+    if minecraft_live() and settings.minecraft_camera then return mc_camera.mode end
+    return 0
+end
+
+local function update_toggle_key()
+    frame_counter = frame_counter + 1
+    if frame_counter % 2 == 0 then read_bridge() end
+    local ok, down = pcall(function() return reframework:is_key_down(KEY_F5) end)
+    if not ok then return end
+    -- While Minecraft is connected, the HUD script passes F5 on to Minecraft, which switches its camera
+    if down and not f5_was_down and not minecraft_live() then
+        settings.first_person = not settings.first_person
+    end
+    f5_was_down = down
+end
 
 local function key_is_down(key)
     local ok, down = pcall(function() return reframework:is_key_down(key) end)
@@ -286,9 +326,9 @@ local function look_from_rotation(rot)
     look.pitch = math.asin(math.max(-1, math.min(1, f.y)))
 end
 
-local function rotation_from_look()
+local function rotation_from_look(yaw, pitch)
     local ok, q = pcall(function()
-        local y, p = look.yaw * 0.5, look.pitch * 0.5
+        local y, p = (yaw or look.yaw) * 0.5, (pitch or look.pitch) * 0.5
         return Quaternion.new(math.cos(y), 0, math.sin(y), 0) * Quaternion.new(math.cos(p), math.sin(p), 0, 0)
     end)
     if ok then return q end
@@ -297,15 +337,6 @@ end
 
 -- Once per frame: turn by the mouse, ease the eye height between standing and sneaking
 local function update_look(cam_transform)
-    frame_counter = frame_counter + 1
-    if frame_counter % 30 == 0 then
-        local ok, b = pcall(json.load_file, "minecraft_bridge.json")
-        if ok and type(b) == "table" then
-            if type(b.sensitivity) == "number" then bridge_settings.sensitivity = b.sensitivity end
-            bridge_settings.invert = b.invert_mouse == true
-        end
-    end
-
     local dx, dy = read_mouse()
     local rot = try_call(cam_transform, "get_Rotation")
     if look.yaw == nil or frame_counter > mouse.alive_until then
@@ -324,13 +355,35 @@ local function update_look(cam_transform)
     eye = eye and (eye + (target - eye) * 0.35) or target
 end
 
+-- Minecraft's FOV is vertical; RE4's camera is told to read it that way too
+local function apply_fov(camera)
+    local use = settings.minecraft_fov and settings.minecraft_camera and minecraft_live() and mc_camera.fov ~= nil
+    if use then
+        if re4_fov == nil then
+            re4_fov = { fov = try_call(camera, "get_FOV"), vertical = try_call(camera, "get_VerticalEnable") }
+        end
+        try_call(camera, "set_VerticalEnable", true)
+        try_call(camera, "set_FOV", mc_camera.fov)
+        debug.fov = string.format("Minecraft %.1f (vertical)", mc_camera.fov)
+    elseif re4_fov ~= nil then
+        if re4_fov.vertical ~= nil then try_call(camera, "set_VerticalEnable", re4_fov.vertical) end
+        if re4_fov.fov ~= nil then try_call(camera, "set_FOV", re4_fov.fov) end
+        re4_fov = nil
+        debug.fov = "RE4's own"
+    end
+end
+
+local minecraft_crosshair = false   -- = Minecraft's picture is shown over RE4 (see update_overlay_state)
+local function minecraft_picture_shown() return minecraft_crosshair end
+
 local function update_camera(stage)
     local joint, transform = get_head_joint()
     if joint == nil then return end
 
     -- Only change meshes during the game update, never while a frame is being prepared for drawing
     if stage == "LateUpdateBehavior" then
-        set_head_hidden(settings.first_person and settings.hide_head, transform)
+        local third = minecraft_view_mode() ~= 0
+        set_head_hidden(settings.first_person and settings.hide_head and not (third and not minecraft_picture_shown()), transform)
     end
 
     local selected = STAGES[settings.stage]
@@ -355,11 +408,25 @@ local function update_camera(stage)
             debug.camera = "could not read Leon's position"
             return
         end
-        rot = rotation_from_look()
+        local yaw, pitch = look.yaw or 0, look.pitch or 0
+        local eye_pos = feet + Vector3f.new(0, eye, 0)
+        local mode = minecraft_view_mode()
+        if mode == 1 or mode == 2 then
+            -- Minecraft's third person: the camera backs away from the eyes (behind, or in front looking back)
+            local forward = Vector3f.new(-math.sin(yaw) * math.cos(pitch), math.sin(pitch), -math.cos(yaw) * math.cos(pitch))
+            if mode == 1 then
+                rot = rotation_from_look()
+                new_pos = eye_pos - forward * mc_camera.distance
+            else
+                rot = rotation_from_look(yaw + math.pi, -pitch)
+                new_pos = eye_pos + forward * mc_camera.distance
+            end
+        else
+            rot = rotation_from_look()
+            local flat_forward = Vector3f.new(-math.sin(yaw), 0, -math.cos(yaw))
+            new_pos = eye_pos + flat_forward * settings.forward_offset
+        end
         if rot ~= nil then try_call(cam_transform, "set_Rotation", rot) end
-        local yaw = look.yaw or 0
-        local flat_forward = Vector3f.new(-math.sin(yaw), 0, -math.cos(yaw))
-        new_pos = feet + Vector3f.new(0, eye, 0) + flat_forward * settings.forward_offset
     else
         local pos = try_call(joint, "get_Position")
         if pos == nil then
@@ -378,6 +445,7 @@ local function update_camera(stage)
     end
 
     try_call(cam_transform, "set_Position", new_pos)
+    apply_fov(camera)
     debug.camera = "moved (camera: " .. tostring(try_call(cam_obj, "get_Name")) .. ")"
     debug.last_stage = stage
 end
@@ -411,7 +479,6 @@ end
 -- While the overlay plugin shows Minecraft's own rendering, Minecraft draws the real crosshair
 local overlay_check_frame = 0
 local overlay_beat, overlay_beat_frame = nil, -100000
-local minecraft_crosshair = false
 
 local function update_overlay_state()
     overlay_check_frame = overlay_check_frame + 1
@@ -448,11 +515,12 @@ end)
 re.on_draw_ui(function()
     if imgui.tree_node("Minecraft First Person") then
         local changed
-        changed, settings.first_person = imgui.checkbox("First person (F5)", settings.first_person)
+        changed, settings.first_person = imgui.checkbox("Minecraft camera on (F5 without Minecraft)", settings.first_person)
         changed, settings.minecraft_camera = imgui.checkbox("Minecraft camera (eye height + mouse look)", settings.minecraft_camera)
         changed, settings.eye_height = imgui.slider_float("Eye height", settings.eye_height, 1.2, 2.0)
         changed, settings.hide_head = imgui.checkbox("Hide Leon's body (first person)", settings.hide_head)
         changed, settings.crosshair = imgui.checkbox("Crosshair", settings.crosshair)
+        changed, settings.minecraft_fov = imgui.checkbox("Minecraft's field of view", settings.minecraft_fov)
         changed, settings.forward_offset = imgui.slider_float("Forward offset", settings.forward_offset, -0.5, 0.5)
         changed, settings.up_offset = imgui.slider_float("Up offset", settings.up_offset, -0.3, 0.3)
         changed, settings.stage = imgui.combo("Camera timing", settings.stage, STAGES)
@@ -462,6 +530,8 @@ re.on_draw_ui(function()
             imgui.text("Head: " .. debug.head)
             imgui.text("Camera: " .. debug.camera)
             imgui.text("Look: " .. debug.look)
+            imgui.text(string.format("Minecraft camera: %s, distance %.2f", ({ [0] = "first person", "behind", "in front" })[mc_camera.mode] or "?", mc_camera.distance))
+            imgui.text("FOV: " .. debug.fov)
             imgui.text("Last timing used: " .. debug.last_stage)
             if imgui.button("List joints") then list_joints() end
             imgui.same_line()

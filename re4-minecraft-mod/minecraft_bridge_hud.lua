@@ -711,7 +711,7 @@ end
 ------------------------------------------------------------------------------
 
 local INPUT_FILE = "minecraft_bridge_input.json"   -- relative to reframework\data
-local input = { seq = 0, swings = 0, uses = 0, keys = {} }
+local input = { seq = 0, swings = 0, uses = 0, perspective = 0, keys = {} }
 local HEARTBEAT_FRAMES = 10   -- Minecraft gives control back to its keyboard if RE4 goes quiet
 
 local MOVE_KEYS = {
@@ -723,6 +723,7 @@ local MOVE_KEYS = {
 local number_keys_down = {}
 local mouse_was_down = false
 local right_was_down = false
+local f5_was_down = false
 local input_info = "nothing sent yet"
 local mouse_source = "none"
 local select_frame = -1000
@@ -880,6 +881,14 @@ local function update_input()
         changed = true
     end
     right_was_down = right
+
+    -- F5: Minecraft switches between first person, behind and in front (the camera script follows it)
+    local f5 = key_down(0x74)
+    if f5 and not f5_was_down then
+        input.perspective = input.perspective + 1
+        changed = true
+    end
+    f5_was_down = f5
 
     if changed then send_input() end
 end

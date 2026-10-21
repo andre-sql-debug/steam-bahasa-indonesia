@@ -37,6 +37,7 @@ local sync_seq = 0
 local f9_was_down = false
 local quad_mode = nil         -- "quad" if draw.filled_quad works, else "lines"
 local last_leon = nil         -- to notice when the game teleports Leon to another area
+local terrain_mode = false    -- anchor comes from minecraft_terrain.lua
 local REANCHOR_DISTANCE = 20
 local debug = { faces = 0, status = "waiting for Minecraft" }
 
@@ -265,6 +266,17 @@ re.on_frame(function()
         last_leon = nil
         return
     end
+    -- In terrain mode (minecraft_terrain.lua) both worlds share the terrain script's anchor
+    if frame % 30 == 0 then
+        local ok, t = pcall(json.load_file, "minecraft_terrain.json")
+        if ok and type(t) == "table" and type(t.anchor_re4) == "table" and type(bridge.anchor) == "table"
+            and t.epoch ~= 0 and bridge.anchor.epoch == t.epoch then
+            anchor_re4 = { x = t.anchor_re4.x, y = t.anchor_re4.y, z = t.anchor_re4.z }
+            anchor_mc = { x = bridge.anchor.x, y = bridge.anchor.y, z = bridge.anchor.z }
+            terrain_mode = true
+        end
+    end
+    if terrain_mode then reanchor = false end
     -- New area (save loaded, door, cutscene): line the two worlds up again here
     if last_leon ~= nil then
         local dx, dz = leon.x - last_leon.x, leon.z - last_leon.z
@@ -273,7 +285,7 @@ re.on_frame(function()
     last_leon = Vector3f.new(leon.x, leon.y, leon.z)
     if anchor_re4 == nil or reanchor then set_anchor(leon) end
 
-    if frame % SYNC_EVERY_FRAMES == 0 and not reanchor then write_sync(leon) end
+    if frame % SYNC_EVERY_FRAMES == 0 and not reanchor and not terrain_mode then write_sync(leon) end
     load_blocks()
 
     local cam = camera_position()

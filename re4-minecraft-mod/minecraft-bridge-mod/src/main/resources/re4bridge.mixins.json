@@ -3,6 +3,7 @@
   "package": "dev.re4bridge.mixin",
   "compatibilityLevel": "JAVA_21",
   "client": [
+    "CameraMixin",
     "GameRendererMixin",
     "KeyboardInputMixin",
     "LevelRendererMixin",
@@ -10,5 +11,8 @@
   ],
   "injectors": {
     "defaultRequire": 1
-  }
+  },
+  "mixins": [
+    "EntityMixin"
+  ]
 }

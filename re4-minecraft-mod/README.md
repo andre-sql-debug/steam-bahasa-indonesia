@@ -6,6 +6,11 @@ calculates attacks, and REFramework scripts copy that movement to Leon, apply th
 enemies and draw Minecraft's HUD. RE4 only adds its world (walls, floors) and its enemies.
 Use a **Superflat** world in Minecraft so its player isn't blocked by Minecraft blocks.
 
+**Terrain mode** (like RE4Craft): RE4's floors and walls around Leon are measured with RE4's own physics
+raycasts and sent to Minecraft, which adds them as collision boxes for its player (moved up to y=250, above
+its own world). Minecraft's physics then decides everything: walking, jumping, stairs and ramps, walls,
+falling; Leon is just placed where the Minecraft player is.
+
 ```
 Minecraft 1.21.1 + RE4 Bridge mod  --writes-->  RE4\reframework\data\minecraft_bridge.json        --read by-->  minecraft_bridge_hud.lua
 Minecraft 1.21.1 + RE4 Bridge mod  <--reads--   RE4\reframework\data\minecraft_bridge_input.json  <--writes--  minecraft_bridge_hud.lua
@@ -40,11 +45,17 @@ Copy the `.lua` files into `<RE4 game folder>\reframework\autorun\`. Settings: p
   The HUD is drawn from Minecraft's own images (hotbar, hearts, hunger, armor, XP bar) and font, and item
   icons are the real Minecraft textures, all sent by the Minecraft mod. RE4's own UI is hidden while
   Leon is in the game (**F8** shows it again).
-- `minecraft_first_person.lua`: Minecraft's first-person camera (toggle with **F5**), with all of Leon hidden
-  (body, head, hair, weapons) so only Minecraft's hand shows: a steady eye height above
+- `minecraft_first_person.lua`: Minecraft's camera, with all of Leon hidden (body, head, hair, weapons).
+  **F5** works like in Minecraft: first person → behind → in front. In the third-person views your
+  Minecraft character (your skin, Minecraft's walk/swing animations, held item) is drawn by Minecraft into
+  the overlay, and RE4's camera is put exactly where Minecraft's camera is (also stopped by RE4 walls), with
+  Minecraft's field of view including the sprint zoom. First person: a steady eye height above
   Leon's feet (1.62 m, 1.27 m sneaking), turned only by the raw mouse (read by the overlay plugin) with
   Minecraft's sensitivity formula and your Minecraft sensitivity setting. Draws a `+` crosshair only when
   Minecraft isn't drawing its own.
+- `minecraft_terrain.lua`: terrain mode (see above). Scans a 10 m radius around Leon in 0.5 m cells and
+  places Leon where Minecraft's player is. **F7** gives Leon back to RE4 (ladders, doors, cutscenes),
+  **F9** re-anchors the two worlds. Debug: Script Generated UI → Minecraft Terrain.
 - `minecraft_gameplay.lua`: copies the Minecraft player's movement (walking, sprinting, sneaking, jumping,
   Creative flying) to Leon and applies Minecraft's attack damage (cooldown, crits) to the enemy in front of
   you. Without Minecraft it falls back to built-in Minecraft movement numbers. Also: no damage for Leon.
@@ -58,7 +69,7 @@ Copy the `.lua` files into `<RE4 game folder>\reframework\autorun\`. Settings: p
 A client-only Fabric mod for Minecraft Java **1.21.1**.
 
 1. Install a Java 21 JDK (e.g. Eclipse Temurin 21).
-2. Build: in `minecraft-bridge-mod`, run `gradlew.bat build` (Windows). The mod is `build\libs\re4bridge-0.5.1.jar`.
+2. Build: in `minecraft-bridge-mod`, run `gradlew.bat build` (Windows). The mod is `build\libs\re4bridge-0.7.0.jar`.
 3. Install Fabric Loader for 1.21.1 (Fabric installer, or a Fabric 1.21.1 profile in the CurseForge/Modrinth app)
    and put the jar in that profile's `mods` folder.
 4. Start Minecraft once. `config\re4bridge.txt` holds the path of the file it writes; change it if RE4 is
