@@ -60,6 +60,7 @@ local control = {
     leon_present = false,
     menu = false,         -- an RE4 menu is (probably) open
     manual = false,       -- F7: everything to RE4
+    minecraft_screen = false,   -- a Minecraft screen is open (set by minecraft_bridge_hud.lua)
     frame = 0,
     flags = {},           -- flag name -> true, for the debug panel
 }
@@ -71,6 +72,7 @@ local missing_methods = {}   -- methods this RE4 version doesn't have
 local failures = {}          -- method -> calls failed in a row (a call can fail while a level loads)
 local MISSING_AFTER = 600
 local menu_leon_pos = nil
+local minecraft_screen_until = -1
 
 local function key_pressed(key)
     local ok, down = pcall(function() return reframework:is_key_down(key) end)
@@ -130,6 +132,9 @@ re.on_pre_application_entry("UpdateBehavior", function()
     for _, key in ipairs(MENU_KEYS) do
         if key_pressed(key) then menu_key = true end
     end
+    -- While a Minecraft screen is open (and just after Esc/E closed it) these keys are Minecraft's
+    if control.minecraft_screen then minecraft_screen_until = control.frame + 20 end
+    if control.frame <= minecraft_screen_until then menu_key = false end
     if menu_key and control.leon_present then
         control.menu = not control.menu
         menu_leon_pos = pos

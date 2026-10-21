@@ -17,7 +17,8 @@
 //  16  u32 latest slot (0/1, written last)   20  u32 active (1 while Minecraft streams)
 //  24  u64 frame counter   32  u32 input to RE4: 0 = none of Minecraft's (mouse + movement keys stay
 //      with Minecraft), 1 = movement keys (RE4 moves Leon: ladders, the boat), 2 = everything (a cutscene
-//      where your Minecraft character plays Leon)   36..63 reserved
+//      where your Minecraft character plays Leon)   36  u32 a Minecraft screen is open (inventory,
+//      creative menu, chat...): Minecraft gets all keys and the mouse   40..63 reserved
 //  64  slot 0, then slot 1: width*height RGBA8 pixels each, bottom row first (OpenGL order),
 //      each slot sized for the maximum 1920x1080
 //
@@ -130,6 +131,8 @@ SharedFrame g_shared;
 volatile LONG g_minecraft_active = 0;
 // Which input RE4 gets while Minecraft is drawn: see "input to RE4" in the file layout above
 volatile LONG g_input_to_re4 = 0;
+// True while a Minecraft screen (inventory, chat...) is open: all input goes to Minecraft
+volatile LONG g_minecraft_screen = 0;
 
 // ---------------------------------------------------------------------------------------------
 // D3D12 drawing
@@ -503,6 +506,7 @@ struct Renderer {
         }
         InterlockedExchange(&g_minecraft_active, 1);
         InterlockedExchange(&g_input_to_re4, (LONG)s.u32(32));
+        InterlockedExchange(&g_minecraft_screen, s.u32(36) != 0 ? 1 : 0);
 
         UINT w = s.u32(8), h = s.u32(12);
         if (w == 0 || h == 0 || w > MAX_WIDTH || h > MAX_HEIGHT) return;
@@ -594,20 +598,82 @@ volatile LONG64 g_mouse_x = 0;
 volatile LONG64 g_mouse_y = 0;
 volatile LONG64 g_left_presses = 0;
 volatile LONG64 g_right_presses = 0;
+volatile LONG64 g_left_releases = 0;
+volatile LONG64 g_right_releases = 0;
+volatile LONG64 g_middle_presses = 0;
+volatile LONG64 g_middle_releases = 0;
+volatile LONG64 g_wheel = 0;   // in WHEEL_DELTA units (120 per notch)
 volatile LONG g_left_down = 0;
 volatile LONG g_right_down = 0;
 
-// Keys Minecraft uses for moving and its hotbar. While Minecraft has Leon, RE4 must not act on them too
-// (Space readies the knife, Shift runs, Ctrl, E crouches, Q turns around, 1-9 switch weapons).
+// Keyboard events for Minecraft (its screens: inventory, creative search, chat; and its hotkeys), kept
+// in a small numbered log so Minecraft can pick up every event it hasn't seen yet. kind: 0 = key up,
+// 1 = key down, 2 = typed character, 3 = key repeat. code: the virtual key, or the character.
+struct KeyEvent {
+    uint64_t seq;
+    int kind;
+    unsigned code;
+};
+constexpr int KEY_LOG = 128;
+KeyEvent g_key_log[KEY_LOG];
+uint64_t g_key_seq = 0;
+SRWLOCK g_key_lock = SRWLOCK_INIT;
+bool g_raw_keyboard = false;   // RE4 gets raw keyboard input: use that, not the legacy key messages
+bool g_keys_down[256] = {};
+
+void push_key_event(int kind, unsigned code) {
+    AcquireSRWLockExclusive(&g_key_lock);
+    KeyEvent& e = g_key_log[g_key_seq % KEY_LOG];
+    e.seq = ++g_key_seq;
+    e.kind = kind;
+    e.code = code;
+    ReleaseSRWLockExclusive(&g_key_lock);
+}
+
+// One key going down or up (from raw input or key messages): the key event, and for a key going down the
+// characters it types with the current Shift/Caps state
+void on_key(UINT vk, UINT scan, bool down) {
+    if (vk == 0 || vk >= 256) return;
+    if (!down) {
+        g_keys_down[vk] = false;
+        push_key_event(0, vk);
+        return;
+    }
+    push_key_event(g_keys_down[vk] ? 3 : 1, vk);
+    g_keys_down[vk] = true;
+    BYTE state[256] = {};
+    bool shift = g_keys_down[VK_SHIFT] || g_keys_down[VK_LSHIFT] || g_keys_down[VK_RSHIFT];
+    bool ctrl = g_keys_down[VK_CONTROL] || g_keys_down[VK_LCONTROL] || g_keys_down[VK_RCONTROL];
+    if (shift) state[VK_SHIFT] = 0x80;
+    if (ctrl) state[VK_CONTROL] = 0x80;
+    if (GetKeyState(VK_CAPITAL) & 1) state[VK_CAPITAL] = 0x01;
+    WCHAR chars[4] = {};
+    // flag 4: don't change the keyboard's dead-key state (Windows 10 1607+)
+    int n = ToUnicode(vk, scan, state, chars, 4, 4);
+    for (int i = 0; i < n; ++i) {
+        if (chars[i] >= 0x20 && chars[i] != 0x7F) push_key_event(2, chars[i]);
+    }
+}
+
+// Keys Minecraft uses for moving, its hotbar and its screens. While Minecraft has Leon, RE4 must not act on
+// them too (Space readies the knife, Shift runs, Ctrl, E crouches, Q turns around, 1-9 switch weapons).
 bool is_minecraft_key(UINT vk) {
     switch (vk) {
     case 'W': case 'A': case 'S': case 'D': case 'E': case 'Q':
+    case 'T': case VK_OEM_2: case VK_F1: case VK_F2: case VK_F3:   // chat, commands, Minecraft's F-keys
     case VK_SPACE: case VK_SHIFT: case VK_LSHIFT: case VK_RSHIFT:
     case VK_CONTROL: case VK_LCONTROL: case VK_RCONTROL:
         return true;
     default:
         return vk >= '1' && vk <= '9';
     }
+}
+
+bool raw_keyboard_input(long long lparam) {
+    RAWINPUTHEADER header{};
+    UINT size = sizeof(header);
+    return GetRawInputData((HRAWINPUT)lparam, RID_HEADER, &header, &size, sizeof(RAWINPUTHEADER)) != (UINT)-1 &&
+           header.dwType == RIM_TYPEKEYBOARD;
 }
 
 bool on_message(void* hwnd, unsigned int msg, unsigned long long wparam, long long lparam) {
@@ -618,8 +684,18 @@ bool on_message(void* hwnd, unsigned int msg, unsigned long long wparam, long lo
         UINT size = sizeof(raw);
         bool got = GetRawInputData((HRAWINPUT)lparam, RID_INPUT, &raw, &size, sizeof(RAWINPUTHEADER)) != (UINT)-1;
         if (got && raw.header.dwType == RIM_TYPEKEYBOARD) {
-            raw_minecraft_key = is_minecraft_key(raw.data.keyboard.VKey);
-            raw_release = (raw.data.keyboard.Flags & RI_KEY_BREAK) != 0;
+            const RAWKEYBOARD& k = raw.data.keyboard;
+            raw_minecraft_key = is_minecraft_key(k.VKey);
+            raw_release = (k.Flags & RI_KEY_BREAK) != 0;
+            if (k.VKey != 0xFF) {   // 0xFF: part of an escape sequence, not a key
+                g_raw_keyboard = true;
+                UINT vk = k.VKey;
+                // Tell left and right Shift/Ctrl/Alt apart (Minecraft has separate keys for them)
+                if (vk == VK_SHIFT) vk = MapVirtualKeyW(k.MakeCode, MAPVK_VSC_TO_VK_EX);
+                else if (vk == VK_CONTROL) vk = (k.Flags & RI_KEY_E0) ? VK_RCONTROL : VK_LCONTROL;
+                else if (vk == VK_MENU) vk = (k.Flags & RI_KEY_E0) ? VK_RMENU : VK_LMENU;
+                on_key(vk, k.MakeCode, !raw_release);
+            }
         } else if (got && raw.header.dwType == RIM_TYPEMOUSE) {
             raw_mouse = true;
             const RAWMOUSE& m = raw.data.mouse;
@@ -631,9 +707,29 @@ bool on_message(void* hwnd, unsigned int msg, unsigned long long wparam, long lo
                 InterlockedAdd64(&g_mouse_y, m.lLastY);
             }
             if (m.usButtonFlags & RI_MOUSE_LEFT_BUTTON_DOWN) { InterlockedIncrement64(&g_left_presses); InterlockedExchange(&g_left_down, 1); }
-            if (m.usButtonFlags & RI_MOUSE_LEFT_BUTTON_UP) InterlockedExchange(&g_left_down, 0);
+            if (m.usButtonFlags & RI_MOUSE_LEFT_BUTTON_UP) { InterlockedIncrement64(&g_left_releases); InterlockedExchange(&g_left_down, 0); }
             if (m.usButtonFlags & RI_MOUSE_RIGHT_BUTTON_DOWN) { InterlockedIncrement64(&g_right_presses); InterlockedExchange(&g_right_down, 1); }
-            if (m.usButtonFlags & RI_MOUSE_RIGHT_BUTTON_UP) InterlockedExchange(&g_right_down, 0);
+            if (m.usButtonFlags & RI_MOUSE_RIGHT_BUTTON_UP) { InterlockedIncrement64(&g_right_releases); InterlockedExchange(&g_right_down, 0); }
+            if (m.usButtonFlags & RI_MOUSE_MIDDLE_BUTTON_DOWN) InterlockedIncrement64(&g_middle_presses);
+            if (m.usButtonFlags & RI_MOUSE_MIDDLE_BUTTON_UP) InterlockedIncrement64(&g_middle_releases);
+            if (m.usButtonFlags & RI_MOUSE_WHEEL) InterlockedAdd64(&g_wheel, (SHORT)m.usButtonData);
+        }
+    }
+    // Without raw keyboard input, the key messages carry the keys
+    if (!g_raw_keyboard) {
+        UINT scan = (UINT)((lparam >> 16) & 0xFF);
+        if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) {
+            UINT vk = (UINT)wparam;
+            if (vk == VK_SHIFT) vk = MapVirtualKeyW(scan, MAPVK_VSC_TO_VK_EX);
+            else if (vk == VK_CONTROL) vk = (lparam & (1LL << 24)) ? VK_RCONTROL : VK_LCONTROL;
+            else if (vk == VK_MENU) vk = (lparam & (1LL << 24)) ? VK_RMENU : VK_LMENU;
+            on_key(vk, scan, true);
+        } else if (msg == WM_KEYUP || msg == WM_SYSKEYUP) {
+            UINT vk = (UINT)wparam;
+            if (vk == VK_SHIFT) vk = MapVirtualKeyW(scan, MAPVK_VSC_TO_VK_EX);
+            else if (vk == VK_CONTROL) vk = (lparam & (1LL << 24)) ? VK_RCONTROL : VK_LCONTROL;
+            else if (vk == VK_MENU) vk = (lparam & (1LL << 24)) ? VK_RMENU : VK_LMENU;
+            on_key(vk, scan, false);
         }
     }
 
@@ -641,6 +737,26 @@ bool on_message(void* hwnd, unsigned int msg, unsigned long long wparam, long lo
     // the moving, looking and clicking. Releases always go through, so RE4 never keeps a key or button
     // "held" that was pressed during its own turn.
     bool menu_open = g_param != nullptr && g_param->functions->is_drawing_ui();
+    // A Minecraft screen is open (inventory, chat...): Minecraft gets every key and the mouse; RE4 gets
+    // none of it (Esc closes Minecraft's screen, not RE4's pause menu)
+    if (g_minecraft_active && g_minecraft_screen && !menu_open) {
+        switch (msg) {
+        case WM_INPUT:
+            if ((raw_mouse || raw_keyboard_input(lparam)) && !raw_release) {
+                return false;
+            }
+            break;
+        case WM_KEYDOWN: case WM_SYSKEYDOWN: case WM_CHAR: case WM_SYSCHAR:
+        case WM_MOUSEMOVE: case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK:
+        case WM_RBUTTONDOWN: case WM_RBUTTONDBLCLK:
+        case WM_MBUTTONDOWN: case WM_MOUSEWHEEL: case WM_MOUSEHWHEEL:
+        case WM_XBUTTONDOWN:
+            return false;
+        default:
+            break;
+        }
+        return true;
+    }
     if (g_minecraft_active && g_input_to_re4 < 2 && !menu_open) {
         bool keys_to_re4 = g_input_to_re4 == 1;
         switch (msg) {
@@ -671,11 +787,26 @@ void write_mouse() {
     static std::wstring tmp = data_folder() + L"minecraft_mouse.json.tmp";
     FILE* f = _wfopen(tmp.c_str(), L"wb");
     if (f == nullptr) return;
-    fprintf(f, "{\"frame\":%llu,\"x\":%lld,\"y\":%lld,\"left_presses\":%lld,\"right_presses\":%lld,\"left\":%s,\"right\":%s,\"minecraft_has_mouse\":%s}",
+    fprintf(f, "{\"frame\":%llu,\"x\":%lld,\"y\":%lld,\"left_presses\":%lld,\"right_presses\":%lld,"
+               "\"left_releases\":%lld,\"right_releases\":%lld,\"middle_presses\":%lld,\"middle_releases\":%lld,"
+               "\"wheel\":%lld,\"left\":%s,\"right\":%s,\"minecraft_has_mouse\":%s,",
             (unsigned long long)g_present_count, (long long)g_mouse_x, (long long)g_mouse_y,
             (long long)g_left_presses, (long long)g_right_presses,
+            (long long)g_left_releases, (long long)g_right_releases,
+            (long long)g_middle_presses, (long long)g_middle_releases, (long long)g_wheel,
             g_left_down ? "true" : "false", g_right_down ? "true" : "false",
             g_minecraft_active ? "true" : "false");
+    // The keyboard log: newest sequence number and the last events, oldest first
+    AcquireSRWLockShared(&g_key_lock);
+    uint64_t newest = g_key_seq;
+    fprintf(f, "\"kseq\":%llu,\"kev\":[", (unsigned long long)newest);
+    uint64_t first = newest > KEY_LOG ? newest - KEY_LOG + 1 : 1;
+    for (uint64_t seq = first; seq <= newest; ++seq) {
+        const KeyEvent& e = g_key_log[seq % KEY_LOG];
+        fprintf(f, "%s[%llu,%d,%u]", seq == first ? "" : ",", (unsigned long long)e.seq, e.kind, e.code);
+    }
+    ReleaseSRWLockShared(&g_key_lock);
+    fprintf(f, "]}");
     fclose(f);
     MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
 }

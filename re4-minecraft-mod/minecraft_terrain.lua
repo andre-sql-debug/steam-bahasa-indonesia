@@ -268,6 +268,16 @@ local function update_scan(leon_pos)
     debug.scanned = scanned
 end
 
+-- Alive by the game's own flags (an enemy can be at 0 HP and still standing); HP > 0 only as a last resort
+local function enemy_alive(hp)
+    if hp == nil then return false end
+    local live = try_call(hp, "get_IsLive")
+    if live ~= nil then return live == true end
+    local dead = try_call(hp, "get_IsDead")
+    if dead ~= nil then return dead ~= true end
+    return (try_call(hp, "get_CurrentHitPoint") or 0) > 0
+end
+
 -- RE4's living enemies near Leon in Minecraft coordinates: "key,x,y,z;..." (key = the enemy's address,
 -- the same key minecraft_gameplay.lua uses to apply the damage Minecraft reports back)
 local function enemies_for_minecraft(leon_pos)
@@ -280,8 +290,7 @@ local function enemies_for_minecraft(leon_pos)
         local enemy = try_call(list, "get_Item", i)
         local pos = enemy and try_call(enemy, "get_Position")
         local hp = enemy and try_call(enemy, "get_HitPoint")
-        local current = hp and try_call(hp, "get_CurrentHitPoint")
-        if pos ~= nil and current ~= nil and current > 0 and (pos - leon_pos):length() <= ENEMY_RANGE then
+        if pos ~= nil and enemy_alive(hp) and (pos - leon_pos):length() <= ENEMY_RANGE then
             local ok, address = pcall(function() return enemy:get_address() end)
             if ok and address ~= nil then
                 parts[#parts + 1] = string.format("%s,%.2f,%.2f,%.2f", tostring(address),

@@ -528,6 +528,106 @@ end
 -- Combat
 ------------------------------------------------------------------------------
 
+-- Damage to an RE4 enemy, the way the game counts it: its own subtraction when this game version has one,
+-- else the hit point number; and on a killing hit the engine's own death call, chainsaw.HitPoint.dead()
+-- (writing 0 alone leaves the enemy walking around at 0 HP). Enemies the game marks as unkillable right
+-- now (scripted moments, boss phases) stop at 1 HP.
+local hp_api_cache = {}   -- HitPoint type name -> { add_damage = method|false, dead = method|false }
+
+local function hp_api(hp)
+    local ok, td = pcall(function() return hp:get_type_definition() end)
+    if not ok or td == nil then return {} end
+    local name = td:get_full_name()
+    local api = hp_api_cache[name]
+    if api == nil then
+        local function find(...)
+            for _, n in ipairs({ ... }) do
+                local okm, m = pcall(function() return td:get_method(n) end)
+                if okm and m ~= nil then return m end
+            end
+            return false
+        end
+        api = {
+            add_damage = find("addDamage(System.Int32)", "addDamage"),
+            dead = find("dead()", "dead"),
+        }
+        -- only use addDamage when it takes exactly one int (other overloads would get garbage)
+        if api.add_damage then
+            local okp, n = pcall(function() return api.add_damage:get_num_params() end)
+            if not okp or n ~= 1 then api.add_damage = false end
+        end
+        hp_api_cache[name] = api
+    end
+    return api
+end
+
+local function hp_flag(hp, getter) return try_call(hp, getter) == true end
+
+-- Alive by the game's own flags; HP > 0 only as a last resort
+local function enemy_alive(hp)
+    if hp == nil then return false end
+    local live = try_call(hp, "get_IsLive")
+    if live ~= nil then return live == true end
+    local dead = try_call(hp, "get_IsDead")
+    if dead ~= nil then return dead ~= true end
+    return (try_call(hp, "get_CurrentHitPoint") or 0) > 0
+end
+
+local function write_hp(hp, value)
+    try_call(hp, "set_CurrentHitPoint", value)
+    if try_call(hp, "get_CurrentHitPoint") ~= value then
+        pcall(function() hp:set_field("<CurrentHitPoint>k__BackingField", value) end)
+    end
+end
+
+local death_requested = {}   -- HitPoint address -> frame dead() was called (call it once)
+
+-- amount: RE4 hit points to remove. Returns a short status for the debug line.
+local function apply_re4_damage(hp, amount)
+    if hp == nil then return "no HitPoint" end
+    if not enemy_alive(hp) then return "already dead" end
+    -- scripted moments (cutscenes, boss phases, Verdugo before freezing...): leave them alone
+    if hp_flag(hp, "get_Invincible") or hp_flag(hp, "get_NoDamage") then return "invincible right now" end
+
+    local before = try_call(hp, "get_CurrentHitPoint") or 0
+    local dmg = math.max(1, math.floor(amount + 0.5))
+    local cannot_die = hp_flag(hp, "get_NoDeath") or hp_flag(hp, "get_Immortal")
+    local api = hp_api(hp)
+
+    -- 1. the game's own subtraction, when this build has it
+    local used = "set"
+    if api.add_damage then
+        if pcall(function() api.add_damage:call(hp, dmg) end) then
+            local after = try_call(hp, "get_CurrentHitPoint")
+            if after ~= nil and after < before then used = "addDamage" end
+        end
+    end
+
+    -- 2. otherwise write the number (never below 1 for enemies the game says cannot die now)
+    if used == "set" then
+        local target = before - dmg
+        if cannot_die and target < 1 then target = 1 end
+        write_hp(hp, math.max(0, target))
+    end
+
+    -- 3. lethal: the engine's death call, once per enemy (retry after 2 s if it did not take)
+    local now = try_call(hp, "get_CurrentHitPoint") or 0
+    if now <= 0 and not cannot_die and enemy_alive(hp) and api.dead then
+        local okk, key = pcall(function() return tostring(hp:get_address()) end)
+        key = okk and key or tostring(hp)
+        local last = death_requested[key]
+        if last == nil or state.frame - last > 120 then
+            death_requested[key] = state.frame
+            write_hp(hp, 0)
+            local okd, err = pcall(function() api.dead:call(hp) end)
+            if not okd then return "dead() failed: " .. tostring(err) end
+        end
+    end
+
+    return string.format("%s %d -> %s%s", used, before, tostring(try_call(hp, "get_CurrentHitPoint")),
+        enemy_alive(hp) and "" or " (dead)")
+end
+
 -- How tough enemies usually are: the middle max health among the enemies seen (each enemy counted once)
 local max_hp_counts = {}
 local max_hp_seen = {}   -- enemy address -> true
@@ -576,16 +676,27 @@ local function find_target()
         local enemy = try_call(list, "get_Item", i)
         local pos = enemy and try_call(enemy, "get_Position")
         local hp = enemy and try_call(enemy, "get_HitPoint")
-        local current = hp and try_call(hp, "get_CurrentHitPoint")
-        if pos ~= nil and current ~= nil and current > 0 then
+        if pos ~= nil and enemy_alive(hp) then
             note_max_hp(try_call(hp, "get_DefaultHitPoint"), enemy)
-            local to = (pos + Vector3f.new(0, 1.0, 0)) - cam_pos
-            local dist = math.sqrt(to.x * to.x + to.y * to.y + to.z * to.z)
-            if dist <= MC.reach + 0.6 and dist > 0.01 then
-                local aim = (to.x * look.x + to.y * look.y + to.z * look.z) / dist
-                if aim > 0.75 and aim > best_score then
-                    best_hp, best_score = hp, aim
+            -- Aim at the body (legs, chest, head), not one spot; right up close anything in front counts,
+            -- also when the camera is inside the enemy
+            local best_aim, nearest = -1, math.huge
+            for _, height in ipairs({ 0.3, 0.9, 1.5 }) do
+                local to = (pos + Vector3f.new(0, height, 0)) - cam_pos
+                local dist = math.sqrt(to.x * to.x + to.y * to.y + to.z * to.z)
+                local aim = dist > 0.01 and (to.x * look.x + to.y * look.y + to.z * look.z) / dist or 1
+                if dist <= MC.reach + 0.4 then
+                    best_aim = math.max(best_aim, aim)
+                    nearest = math.min(nearest, dist)
                 end
+            end
+            local fx, fz = pos.x - cam_pos.x, pos.z - cam_pos.z
+            local flat = math.sqrt(fx * fx + fz * fz)
+            local in_front = flat < 0.05 or (fx * look.x + fz * look.z) / flat > -0.2
+            local ok = best_aim > 0.75 or (nearest <= 1.5 and best_aim > 0.6) or (flat < 1.0 and in_front)
+            local score = best_aim - nearest * 0.05
+            if ok and score > best_score then
+                best_hp, best_score = hp, score
             end
         end
     end
@@ -605,8 +716,7 @@ local function find_ranged_target()
         local enemy = try_call(list, "get_Item", i)
         local pos = enemy and try_call(enemy, "get_Position")
         local hp = enemy and try_call(enemy, "get_HitPoint")
-        local current = hp and try_call(hp, "get_CurrentHitPoint")
-        if pos ~= nil and current ~= nil and current > 0 then
+        if pos ~= nil and enemy_alive(hp) then
             local to = (pos + Vector3f.new(0, 1.0, 0)) - cam_pos
             local along = to.x * look.x + to.y * look.y + to.z * look.z
             if along > 0.5 and along <= ARROW_RANGE then
@@ -630,16 +740,11 @@ end
 
 -- damage is in Minecraft half-hearts; RE4 enemies lose damage/(their Minecraft health) of their max health
 local function damage_enemy(hp, damage, note)
-    local current = try_call(hp, "get_CurrentHitPoint")
+    local current = try_call(hp, "get_CurrentHitPoint") or 0
     local max = try_call(hp, "get_DefaultHitPoint") or current
     local health = mob_health(max)
-    local new_hp = math.max(0, math.floor(current - max * damage / health))
-    try_call(hp, "set_CurrentHitPoint", new_hp)
-    if try_call(hp, "get_CurrentHitPoint") ~= new_hp then
-        pcall(function() hp:set_field("<CurrentHitPoint>k__BackingField", new_hp) end)
-    end
-    debug.combat = string.format("hit for %.1f%s: enemy HP %s -> %s (as a %d-health mob)", damage, note,
-        tostring(current), tostring(try_call(hp, "get_CurrentHitPoint")), math.floor(health))
+    local result = apply_re4_damage(hp, max * damage / health)
+    debug.combat = string.format("hit for %.1f%s: %s (as a %d-health mob)", damage, note, result, math.floor(health))
 end
 
 local function hit_enemy(damage, note)
@@ -677,8 +782,7 @@ local function update_enemy_damage()
         enemy_damage_seen[key] = total
         if type(total) == "number" and total > before then
             local hp = enemy_hp_by_key(key)
-            local current = hp and try_call(hp, "get_CurrentHitPoint")
-            if current ~= nil and current > 0 then damage_enemy(hp, total - before, " (in Minecraft)") end
+            if enemy_alive(hp) then damage_enemy(hp, total - before, " (in Minecraft)") end
         end
     end
 end

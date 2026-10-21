@@ -75,6 +75,13 @@ public final class OverlayStreamer {
         }
     }
 
+    /** Tells the RE4 plugin a Minecraft screen is open: Minecraft gets all keys and the mouse. */
+    public static void setScreenOpen(boolean open) {
+        if (buffer != null) {
+            INT.setRelease(buffer, 36, open ? 1 : 0);
+        }
+    }
+
     /** Called after Minecraft has drawn its HUD for this frame. */
     public static void capture(Minecraft mc) {
         if (buffer == null) {

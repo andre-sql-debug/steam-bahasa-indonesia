@@ -63,6 +63,11 @@ local function read_bridge()
         end
         data = d
     end
+    -- Tell the other scripts when a Minecraft screen (inventory, creative menu, chat) is open
+    if type(MinecraftRE4Control) == "table" then
+        MinecraftRE4Control.minecraft_screen = data ~= nil and data.screen_open == true
+            and frames_since_change < DISCONNECT_FRAMES
+    end
 end
 
 local function is_connected()
@@ -814,6 +819,13 @@ end
 -- Leon's look direction in Minecraft's terms (yaw 0 = +Z, pitch positive = looking down),
 -- so Minecraft's player aims its placing and breaking where Leon looks
 local function camera_yaw_pitch()
+    -- Minecraft first person's own look direction when it has one (the camera looks elsewhere in F5 views)
+    local c = MinecraftRE4Control
+    local look = type(c) == "table" and c.look or nil
+    if look ~= nil and look.yaw ~= nil and os.clock() - (look.at or 0) < 0.5 then
+        local yaw = (look.yaw + 180) % 360 - 180
+        return yaw, look.pitch
+    end
     local camera = sdk.get_primary_camera()
     local ok, f = pcall(function()
         local rot = camera:call("get_GameObject"):call("get_Transform"):call("get_Rotation")
@@ -841,7 +853,9 @@ local function update_input()
         input.re4_keys = re4_moves
         changed = true
     end
-    local menu = menu_open() or turn
+    -- A Minecraft screen is open: its keys and mouse go straight to Minecraft (the overlay plugin passes them)
+    local minecraft_screen = data ~= nil and data.screen_open == true
+    local menu = menu_open() or turn or minecraft_screen
     for name, keys in pairs(MOVE_KEYS) do
         local down = not menu and not re4_moves and any_key_down(keys)
         if input.keys[name] ~= down then

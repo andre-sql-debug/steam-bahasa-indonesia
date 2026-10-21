@@ -1,6 +1,7 @@
 package dev.re4bridge.mixin;
 
 import dev.re4bridge.Re4Bridge;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.Input;
 import net.minecraft.client.player.KeyboardInput;
 import org.spongepowered.asm.mixin.Mixin;
@@ -14,7 +15,8 @@ public abstract class KeyboardInputMixin extends Input {
     @Inject(method = "tick", at = @At("TAIL"))
     private void re4bridge$useRe4Keys(boolean slowDown, float sneakingSpeedMultiplier, CallbackInfo ci) {
         Re4Bridge.RemoteKeys keys = Re4Bridge.remoteKeys();
-        if (keys == null) {
+        // With a Minecraft screen open (inventory, chat) the player stands still, like in Minecraft
+        if (keys == null || Minecraft.getInstance().screen != null) {
             return;
         }
         this.up = keys.forward;

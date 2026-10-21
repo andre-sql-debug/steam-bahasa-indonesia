@@ -26,6 +26,7 @@ import net.minecraft.world.item.CrossbowItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.EntityHitResult;
 import net.minecraft.world.phys.Vec3;
@@ -98,6 +99,17 @@ public class Re4Bridge implements ClientModInitializer {
     public static float characterBrightness() {
         return characterBrightness;
     }
+
+    public static boolean re4Turn() {
+        return re4Turn;
+    }
+
+    /** RE4's screen width in pixels (from the overlay plugin), or 0 when unknown. */
+    public static int re4ScreenWidth() {
+        return re4ScreenWidth;
+    }
+
+    private static volatile int re4ScreenWidth = 0;
 
     // Written by the renderer mixins, sent to RE4 so its camera matches Minecraft's
     public static volatile double worldFov = 70.0;
@@ -176,6 +188,7 @@ public class Re4Bridge implements ClientModInitializer {
         }
         OverlayStreamer.open(outputFile.resolveSibling("minecraft_overlay.bin"));
         Re4Puppet.init(outputFile.resolveSibling("minecraft_puppet.json"));
+        Re4Input.init(outputFile.resolveSibling("minecraft_mouse.json"));
         LOGGER.info("RE4 Bridge: writing HUD data to {}, reading input from {}", outputFile, inputFile);
     }
 
@@ -207,6 +220,7 @@ public class Re4Bridge implements ClientModInitializer {
         }
         OverlayStreamer.setActive(overlayActive && (!re4Turn || Re4Puppet.active()));
         OverlayStreamer.setInputToRe4(re4Turn ? 2 : (re4Keys ? 1 : 0));
+        OverlayStreamer.setScreenOpen(overlayActive && !re4Turn && mc.screen != null);
     }
 
     // The right mouse button held in RE4 = Minecraft's "use" key held (drawing bows, eating, blocking)
@@ -256,6 +270,7 @@ public class Re4Bridge implements ClientModInitializer {
         int height = 540;
         JsonObject status = readJson(pluginStatusFile);
         if (status != null && status.has("width") && status.has("height")) {
+            re4ScreenWidth = status.get("width").getAsInt();
             int w = status.get("width").getAsInt() / 2;
             int h = status.get("height").getAsInt() / 2;
             if (w >= 320 && h >= 240 && w <= 1920 && h <= 1080) {
@@ -454,14 +469,17 @@ public class Re4Bridge implements ClientModInitializer {
             // Counters: a lower count means the RE4 script was reloaded; just resync
             if (input.has("swings")) {
                 int swings = input.get("swings").getAsInt();
-                if (swings > lastInputSwings && !firstRead) {
-                    leftClick(mc, player);
+                if (swings > lastInputSwings && !firstRead && mc.screen == null) {
+                    // Every click counts (a few at most per tick; Minecraft's attack cooldown still applies)
+                    for (int i = 0; i < Math.min(3, swings - lastInputSwings); i++) {
+                        leftClick(mc, player);
+                    }
                 }
                 lastInputSwings = swings;
             }
             if (input.has("uses")) {
                 int uses = input.get("uses").getAsInt();
-                if (uses > lastInputUses && !firstRead) {
+                if (uses > lastInputUses && !firstRead && mc.screen == null) {
                     // A real "use" click: Minecraft places, eats, draws a bow... and repeats while held
                     KeyMapping.click(InputConstants.getKey(mc.options.keyUse.saveString()));
                 }
@@ -621,13 +639,30 @@ public class Re4Bridge implements ClientModInitializer {
 
     // Left click: break the looked-at block like Minecraft does, otherwise attack (RE4 applies the damage)
     private static void leftClick(Minecraft mc, LocalPlayer player) {
+        // Aim with RE4's newest look direction, not the one from Minecraft's last frame
+        if (remoteYaw != null && remotePitch != null && !Re4Puppet.active()) {
+            player.setYRot(remoteYaw);
+            player.setXRot(remotePitch);
+        }
+        mc.gameRenderer.pick(1.0F);
         // A Minecraft mob, or the stand-in of an RE4 enemy, in the crosshair: Minecraft's own attack
         if (mc.hitResult instanceof EntityHitResult hit && mc.gameMode != null) {
             mc.gameMode.attack(player, hit.getEntity());
             player.swing(InteractionHand.MAIN_HAND);
             return;
         }
+        // An RE4 enemy close in front, even if the crosshair isn't exactly on its stand-in, wins over a block
+        // farther away: still Minecraft's own attack (sounds, crit sparks, damage hearts, knockback,
+        // enchantments), and the damage goes to the RE4 enemy
         BlockHitResult block = lookedAtBlock(player);
+        Entity standIn = standInInFront(mc, player);
+        Vec3 eye = player.getEyePosition();
+        double blockDistance = block != null ? block.getLocation().distanceTo(eye) : Double.MAX_VALUE;
+        if (standIn != null && mc.gameMode != null && Math.sqrt(standIn.getBoundingBox().distanceToSqr(eye)) <= blockDistance) {
+            mc.gameMode.attack(player, standIn);
+            player.swing(InteractionHand.MAIN_HAND);
+            return;
+        }
         if (block != null && mc.gameMode != null) {
             mc.gameMode.startDestroyBlock(block.getBlockPos(), block.getDirection());
             destroying = true;
@@ -635,6 +670,42 @@ public class Re4Bridge implements ClientModInitializer {
             return;
         }
         attack(player);
+    }
+
+    // The RE4 enemy stand-in best in line with the crosshair within reach, or null. Aims at the nearest point
+    // of its body (not one spot), takes an enemy right up close even off-center, and one the camera is inside.
+    private static Entity standInInFront(Minecraft mc, LocalPlayer player) {
+        if (mc.level == null) {
+            return null;
+        }
+        Vec3 eye = player.getEyePosition();
+        Vec3 look = player.getViewVector(1.0F);
+        double reach = player.entityInteractionRange();
+        Entity best = null;
+        double bestScore = 0.0;
+        for (Entity entity : mc.level.entitiesForRendering()) {
+            if (!Re4Enemies.isStandIn(entity) || !entity.isAlive()) {
+                continue;
+            }
+            AABB box = entity.getBoundingBox();
+            Vec3 nearest = new Vec3(Mth.clamp(eye.x, box.minX, box.maxX), Mth.clamp(eye.y, box.minY, box.maxY),
+                    Mth.clamp(eye.z, box.minZ, box.maxZ));
+            Vec3 toNearest = nearest.subtract(eye);
+            double distance = toNearest.length();
+            if (distance > reach) {
+                continue;
+            }
+            Vec3 toCenter = box.getCenter().subtract(eye);
+            double aim = Math.max(distance < 0.01 ? 1.0 : toNearest.dot(look) / distance,
+                    toCenter.length() < 0.01 ? 1.0 : toCenter.dot(look) / toCenter.length());
+            boolean ok = aim > 0.75 || (distance < 1.2 && aim > 0.2) || distance < 0.05;
+            double score = aim - distance * 0.05;
+            if (ok && (best == null || score > bestScore)) {
+                best = entity;
+                bestScore = score;
+            }
+        }
+        return best;
     }
 
     // Survival mining: keep digging while RE4 holds the mouse button, like holding it in Minecraft
@@ -709,6 +780,8 @@ public class Re4Bridge implements ClientModInitializer {
         state.addProperty("game_mode", mc.gameMode != null ? mc.gameMode.getPlayerMode().getName() : "unknown");
         state.addProperty("re4_control", remoteKeys() != null);
         state.addProperty("overlay", overlayActive);
+        // A Minecraft screen is open (inventory, creative menu, chat): RE4's scripts stop looking and moving
+        state.addProperty("screen_open", mc.screen != null);
         // Mouse settings, so RE4's mouse look turns exactly like Minecraft's
         state.addProperty("sensitivity", mc.options.sensitivity().get());
         state.addProperty("invert_mouse", mc.options.invertYMouse().get());

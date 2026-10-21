@@ -1,6 +1,7 @@
 package dev.re4bridge.mixin;
 
 import dev.re4bridge.Re4Bridge;
+import dev.re4bridge.Re4Input;
 import dev.re4bridge.Re4Puppet;
 import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
@@ -14,10 +15,12 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 // After Minecraft has drawn the hand and HUD for this frame, send the picture to RE4
 @Mixin(GameRenderer.class)
 public class GameRendererMixin {
-    // Before the frame: newest cutscene data from RE4 (your character playing Leon)
+    // Before the frame: newest cutscene data from RE4 (your character playing Leon), and keys and mouse from
+    // the RE4 window for Minecraft's screens and hotkeys
     @Inject(method = "render", at = @At("HEAD"))
     private void re4bridge$readPuppet(CallbackInfo ci) {
         Re4Puppet.onRenderFrame(Minecraft.getInstance());
+        Re4Input.onRenderFrame(Minecraft.getInstance());
     }
 
     @Inject(method = "render", at = @At("TAIL"))

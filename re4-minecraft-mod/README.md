@@ -20,10 +20,19 @@ Minecraft through RE4's cutscene camera, walking and turning with Leon, arms and
 Afterwards Minecraft's player is moved to where Leon ended up, keeping the world mapping so the blocks
 you built stay put.
 
+**Minecraft's own controls in RE4**: **E** opens Minecraft's inventory / creative menu inside RE4 (with a
+mouse cursor; click, drag, shift-click and type in the search box), **T** chat, **/** commands, **Q** drops
+the held item, the mouse wheel scrolls the hotbar, **F1**-**F3** do what they do in Minecraft, and **Esc**
+closes Minecraft's screen (not RE4's pause menu). While a Minecraft screen is open, every key and the mouse
+go to Minecraft. TNT works: place it on RE4's ground, light it with flint and steel, and the blast hurts
+RE4's enemies.
+
 **Minecraft in RE4**: spawn eggs and blocks work on RE4's ground; Minecraft's mobs, dropped items,
 arrows and particles are drawn into RE4. Each RE4 enemy near Leon has an (unseen) Minecraft stand-in,
-so iron golems, tamed wolves and your sword fight RE4's enemies; Minecraft's damage is applied to the
-real enemy. Bows and crossbows (hold right-click) hit what the crosshair is on. Bosses get more health
+so iron golems, tamed wolves, TNT and your sword fight RE4's enemies with Minecraft's own attacks (sounds,
+crit sparks, damage hearts, knockback, enchantments); the damage is applied to the real enemy, and a killing
+hit makes RE4 kill it properly (its own death call, so it falls and is gone). Melee reaches enemies right
+up close too. Damage is Minecraft's: a fist does 1, a diamond sword 7 (a normal enemy has a zombie's 20). Bows and crossbows (hold right-click) hit what the crosshair is on. Bosses get more health
 (up to the Wither's 300) than normal enemies (a zombie's 20).
 
 ```
@@ -89,7 +98,7 @@ Copy the `.lua` files into `<RE4 game folder>\reframework\autorun\`. Settings: p
 A client-only Fabric mod for Minecraft Java **1.21.1**.
 
 1. Install a Java 21 JDK (e.g. Eclipse Temurin 21).
-2. Build: in `minecraft-bridge-mod`, run `gradlew.bat build` (Windows). The mod is `build\libs\re4bridge-0.8.0.jar`.
+2. Build: in `minecraft-bridge-mod`, run `gradlew.bat build` (Windows). The mod is `build\libs\re4bridge-0.9.0.jar`.
 3. Install Fabric Loader for 1.21.1 (Fabric installer, or a Fabric 1.21.1 profile in the CurseForge/Modrinth app)
    and put the jar in that profile's `mods` folder.
 4. Start Minecraft once. `config\re4bridge.txt` holds the path of the file it writes; change it if RE4 is

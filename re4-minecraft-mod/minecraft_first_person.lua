@@ -355,6 +355,9 @@ end
 local function update_look(cam_transform)
     local dx, dy = read_mouse()
     local rot = try_call(cam_transform, "get_Rotation")
+    -- A Minecraft screen is open (inventory, chat): the mouse moves its cursor, not the camera
+    local c = MinecraftRE4Control
+    if type(c) == "table" and c.minecraft_screen then dx, dy = 0, 0 end
     if re4_turn() then
         -- RE4 turns its camera; carry on from where it looks when Minecraft takes over again
         if rot ~= nil then look_from_rotation(rot) end
@@ -369,6 +372,13 @@ local function update_look(cam_transform)
         look.yaw = look.yaw - dx * k
         look.pitch = math.max(math.rad(-90), math.min(math.rad(90), look.pitch - dy * k))
         debug.look = string.format("Minecraft mouse look (%.3f deg/count)", degrees_per_count())
+    end
+
+    -- The look direction for Minecraft (yaw/pitch in Minecraft's degrees), also right in the third-person
+    -- views where the camera looks elsewhere (minecraft_bridge_hud.lua sends it)
+    local c = MinecraftRE4Control
+    if type(c) == "table" and look.yaw ~= nil then
+        c.look = { yaw = math.deg(math.pi - look.yaw), pitch = -math.deg(look.pitch), at = os.clock() }
     end
 
     local target = key_is_down(0x10) and settings.sneak_eye_height or settings.eye_height

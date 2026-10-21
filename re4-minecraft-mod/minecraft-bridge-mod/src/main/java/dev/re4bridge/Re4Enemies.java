@@ -165,6 +165,11 @@ public final class Re4Enemies {
         // Not invisible: mobs only notice invisible targets from 2 blocks away. The RE4 picture skips them.
         husk.setNoGravity(true);
         husk.setCanPickUpLoot(false);
+        // RE4's enemies have no Minecraft armor: every point of damage counts
+        var armor = husk.getAttribute(Attributes.ARMOR);
+        if (armor != null) {
+            armor.setBaseValue(0.0);
+        }
         var maxHealth = husk.getAttribute(Attributes.MAX_HEALTH);
         if (maxHealth != null) {
             maxHealth.setBaseValue(MAX_HEALTH);

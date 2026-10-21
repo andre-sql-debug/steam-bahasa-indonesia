@@ -8,7 +8,9 @@
     "HumanoidModelMixin",
     "KeyboardInputMixin",
     "LevelRendererMixin",
-    "MinecraftMixin"
+    "MinecraftMixin",
+    "MouseHandlerAccessor",
+    "ScreenMixin"
   ],
   "injectors": {
     "defaultRequire": 1
