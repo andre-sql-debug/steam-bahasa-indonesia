@@ -464,6 +464,129 @@ def native_player(re4, mc):
                   back_in_first_person=first, parts_gone_in_first_person=gone)
 
 
+# Light blocks minecraft_lights builds: (block, light level, colour kind, inside a full block, where from the player)
+LIGHT_BLOCKS = [("torch", 14, "warm", 0, (2, 0, 3)), ("soul_torch", 10, "cyan", 0, (-2, 0, 3)),
+                ("redstone_torch", 7, "red", 0, (0, 0, 5)), ("glowstone", 15, "pale", 1, (3, 1, -3)),
+                ("sea_lantern", 15, "cool", 1, (-3, 1, -3)), ("lantern", 15, "warm", 0, (4, 0, 0)),
+                ("furnace[lit=true]", 13, "warm_white", 1, (-4, 0, 0)), ("candle[lit=true,candles=2]", 6, "warm_white", 0, (0, 0, -4)),
+                ("furnace[lit=false]", 0, None, 0, (0, 1, -6))]
+
+
+def colour_ok(kind, hex_rgb):
+    r, g, b = (int(hex_rgb[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    return {"warm": r >= 0.95 and g < 0.8 * r and b < 0.5 * r,          # torches, lanterns: orange
+            "cyan": b >= max(r, g) and r < 0.6 * b,                     # soul variants
+            "red": r > 2 * g and r > 2 * b,                             # redstone
+            "pale": r >= g >= b and g >= 0.85 * r and b >= 0.5 * r,     # glowstone: pale yellow
+            "cool": b >= r and min(r, g, b) > 0.8,                      # sea lantern: cool white
+            "warm_white": r >= g >= b and b >= 0.6 * r and r - b >= 0.15 * r}.get(kind, False)
+
+
+def parse_lights(text):
+    """minecraft_bridge.json's lights: (x, y, z, level, RRGGBB, inside) each."""
+    out = []
+    for item in (text or "").split(";"):
+        if item:
+            x, y, z, level, rgb, inside = item.split(",")
+            out.append((float(x), float(y), float(z), int(level), rgb, int(inside)))
+    return out
+
+
+def fake_lights(re4):
+    """The light objects the real minecraft_lights.lua made in the fake RE4: (pos, shown, destroyed, setter values)."""
+    made = re4.L.eval("MADE")
+    out = []
+    for i in range(1, len(made) + 1):
+        go = made[i]
+        if go.comp is None:
+            out.append((None, False, go.destroyed is True, {}))
+            continue
+        values = go.comp["values"]   # (lupa: .values is the table's own method)
+        lit = go.draw and go.pos is not None and values["set_Enabled"] is not False and values["set_Intensity"] not in (None, 0)
+        out.append(((go.pos.x, go.pos.y, go.pos.z) if go.pos is not None else None, lit, go.destroyed is True, values))
+    return out
+
+
+def minecraft_lights(re4, mc):
+    """Light blocks become RE4 lights: Minecraft lists the nearest ones in minecraft_bridge.json (RE4 coordinates of the
+    light's spot, light level, a colour per kind, whether a full block is around it), nearest first and at most 24;
+    the real minecraft_lights.lua (in the fake RE4) puts its light objects on the 16 nearest Leon."""
+    ensure_alive(re4)
+    re4.run_for(0.5)
+    mc.mark()
+    run_commands(re4, [f"/setblock ~{d[0]} ~{d[1]} ~{d[2]} {name}" for name, _, _, _, d in LIGHT_BLOCKS])
+    re4.run_for(1.5)
+    placed = [tuple(int(v) for v in m) for m in
+              re.findall(r"Changed the block at (-?\d+), (-?\d+), (-?\d+)", "\n".join(mc.chat_since()))]
+    if len(placed) != len(LIGHT_BLOCKS):
+        return result("minecraft_lights", False, problem="blocks not placed", chat=mc.chat_since()[-6:])
+    b = re4.bridge()
+    anchor_mc = b.get("anchor") or {}
+    anchor_re4 = (re4.read_json("minecraft_terrain.json") or {}).get("anchor_re4") or {}
+    pos = b.get("pos") or {}
+
+    def to_re4(x, y, z):
+        return (anchor_re4.get("x", 0) + x - anchor_mc.get("x", 0), anchor_re4.get("y", 0) + y - anchor_mc.get("y", 0),
+                anchor_re4.get("z", 0) + z - anchor_mc.get("z", 0))
+    player = to_re4(pos.get("x", 0), pos.get("y", 0), pos.get("z", 0))
+    lights = parse_lights(b.get("lights"))
+    # every lit block once, at its spot (a torch's flame higher), with its level, colour kind and "inside" flag
+    found, problems = {}, []
+    for (name, level, kind, inside, _), at in zip(LIGHT_BLOCKS, placed):
+        lift = 0.7 if "torch" in name else 0.5
+        want = to_re4(at[0] + 0.5, at[1] + lift, at[2] + 0.5)
+        match = [l for l in lights if all(abs(l[i] - want[i]) < 0.002 for i in range(3))]
+        found[name] = match[0] if match else None
+        if level == 0:
+            if match:
+                problems.append(f"{name} listed")
+        elif not match:
+            problems.append(f"{name} missing")
+        elif match[0][3] != level or match[0][5] != inside or not colour_ok(kind, match[0][4]):
+            problems.append(f"{name}: {match[0][3:]}")
+    dist = [math.dist(player, (l[0], l[1], l[2])) for l in lights]
+    nearest_first = all(dist[i] <= dist[i + 1] + 0.25 for i in range(len(dist) - 1))   # (torch flames sit 0.2 higher)
+
+    # The real RE4 script: off, it does nothing; on, a lit light object on each light, then destroyed when off again
+    made_before = len(fake_lights(re4))
+    re4.L.execute("MinecraftRE4Lights.settings.enabled = true")
+    re4.run_for(1.5)
+    objs = [o for o in fake_lights(re4)[made_before:] if o[1]]
+    re4_ok = len(objs) == len(lights) and all(
+        any(all(abs(o[0][i] - l[i]) < 0.002 for i in range(3)) and abs(o[3]["set_Intensity"] - 800 * l[3] / 15) < 1e-3
+            and abs(o[3]["set_Color"].x - int(l[4][0:2], 16) / 255) < 1e-6 for l in lights) for o in objs)
+    status = re4.L.eval("MinecraftRE4Lights.debug.status")
+
+    # Many lights: Minecraft sends the 24 nearest, RE4 lights the 16 nearest Leon
+    lo = (placed[0][0] - 3, placed[0][1] + 4, placed[0][2] + 4)
+    run_commands(re4, [f"/fill {lo[0]} {lo[1]} {lo[2]} {lo[0] + 5} {lo[1]} {lo[2] + 4} glowstone"])
+    re4.run_for(1.5)
+    many = parse_lights(re4.bridge().get("lights"))
+    every = [to_re4(at[0] + 0.5, at[1] + 0.5, at[2] + 0.5) for (n, lv, *_), at in zip(LIGHT_BLOCKS, placed) if lv > 0]
+    every += [to_re4(x + 0.5, lo[1] + 0.5, z + 0.5) for x in range(lo[0], lo[0] + 6) for z in range(lo[2], lo[2] + 5)]
+    listed_far = max((math.dist(player, (l[0], l[1], l[2])) for l in many), default=0)
+    sent = {(round(l[0], 1), round(l[2], 1)) for l in many}
+    unlisted = [math.dist(player, p) for p in every if (round(p[0], 1), round(p[2], 1)) not in sent]
+    cap_ok = len(many) == 24 and listed_far <= min(unlisted, default=99) + 0.25
+    shown_many = sum(1 for o in fake_lights(re4)[made_before:] if o[1])
+
+    re4.L.execute("MinecraftRE4Lights.settings.enabled = false")
+    re4.run_for(0.5)
+    destroyed = all(o[2] for o in fake_lights(re4)[made_before:])
+    lo2 = [min(p[i] for p in placed) for i in range(3)]
+    hi2 = [max(p[i] for p in placed) for i in range(3)]
+    run_commands(re4, [f"/fill {lo2[0]} {lo2[1]} {lo2[2]} {hi2[0]} {hi2[1]} {hi2[2]} air",
+                       f"/fill {lo[0]} {lo[1]} {lo[2]} {lo[0] + 5} {lo[1]} {lo[2] + 4} air"])
+    re4.run_for(1.0)
+    none_left = re4.bridge().get("lights") == ""
+    ok = (not problems and nearest_first and re4_ok and status == "on" and cap_ok and shown_many == 16 and destroyed
+          and none_left)
+    return result("minecraft_lights", ok, lights_sent=len(lights), problems=problems, nearest_first=nearest_first,
+                  sample=b.get("lights", "")[:120], re4_lights_lit=len(objs), re4_status=status,
+                  with_30_glowstone=dict(sent=len(many), re4_lit=shown_many, nearest=cap_ok),
+                  destroyed_when_off=destroyed, none_after_removal=none_left)
+
+
 def leon_damage(re4, mc):
     """RE4's hits on Leon cost Minecraft hearts; RE4 killing Leon kills Minecraft's player."""
     ensure_alive(re4)
@@ -550,4 +673,4 @@ def support_zip(re4, mc):
 
 
 ALL = [lockstep_camera, golem_fight, native_handoff, native_blocks, native_block_occlusion, native_block_shadow, native_player,
-       leon_damage, re4_stopped, support_zip]
+       minecraft_lights, leon_damage, re4_stopped, support_zip]

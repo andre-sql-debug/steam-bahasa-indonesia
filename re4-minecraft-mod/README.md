@@ -66,6 +66,20 @@ animated ones (fire, lanterns, campfires, magma, sea lanterns) and blocks drawn 
 banners). Pixel-art textures are scaled up sharply, and see-through
 pixels are cut out. Needs REFramework's **Loose File Loader** (`install.bat` turns it on).
 
+**Minecraft lights in RE4** (experimental, off by default; setting **Minecraft lights light RE4**): the light
+blocks near you (torches, lanterns, campfires, jack o'lanterns, glowstone, shroomlights, sea lanterns, end rods,
+lit furnaces, lit candles, redstone torches, soul torches and lanterns...) become real RE4 point lights, so they
+light RE4's floors, walls, enemies and Leon like RE4's own lamps. The Minecraft mod sends the 24 light blocks
+nearest its player (each light's spot in RE4, its Minecraft light level and a colour per kind: warm orange for
+torches, lanterns and campfires, blue-cyan for soul ones, red for redstone, pale yellow for glowstone, cool white
+for sea lanterns and end rods, warm white for furnaces and candles), and `minecraft_lights.lua` keeps up to 16 RE4
+lights on the ones nearest Leon: brightness and reach (up to 8 m) follow the light level, and a light is only
+moved or changed when its block is. **Brightness** scales them all; **Lights cast shadows** is off by default
+(slower; a light inside its own full block, like glowstone, never casts them). Needs no model files or Loose File
+Loader, only the two worlds lined up by terrain mode (`minecraft_terrain.lua`). Which of RE4's light settings
+exist isn't confirmed yet: each one is tried, and the section (and the diagnostics report) says which ones worked.
+The light blocks themselves still look like Minecraft's (they don't glow in RE4).
+
 **Hearts and death**: RE4's hits on Leon cost the Minecraft player hearts (Leon keeps full health in RE4),
 and when either dies the other does too (settings: **RE4's hits cost Minecraft hearts**, **Shared death**).
 In Creative mode the Minecraft player takes no damage. If RE4 closes, Minecraft's player is held in place and
@@ -115,7 +129,8 @@ Copy the `.lua` files into `<RE4 game folder>\reframework\autorun\`. Settings: p
 → **Minecraft**.
 
 - `minecraft_menu.lua`: the one **Minecraft** menu. On top: whether Minecraft is connected and who has Leon,
-  the most used switches (hearts, shared death, flinching, real RE4 mobs, camera, cutscenes, RE4's HUD),
+  the most used switches (hearts, shared death, flinching, real RE4 mobs, Minecraft lights, camera, cutscenes,
+  RE4's HUD),
   **Save diagnostics report**, **Make support zip** and **Reset all settings to defaults**; below it every
   script's own section. Settings are saved by themselves in `reframework\data\minecraft_settings.json` and
   come back the next time RE4 starts. **Make support zip** saves the diagnostics report, then the Minecraft
@@ -143,8 +158,9 @@ Copy the `.lua` files into `<RE4 game folder>\reframework\autorun\`. Settings: p
 - `minecraft_diagnostics.lua`: writes `reframework\data\minecraft_diagnostics.json` after a minute of play
   (or **Save report now**): which RE4 methods the mod uses exist, Leon's joints, nearby enemies and their
   health state, who had Leon how often and every handover with its reason (a timeline), frame rate, how
-  RE4's enemies pick targets, what RE4 says about the chapter and area, how the real RE4 mobs loaded, and
-  what RE4 offers for adding objects to its world. **Record real hits** logs which RE4 functions run when
+  RE4's enemies pick targets, what RE4 says about the chapter and area, how the real RE4 mobs loaded, which
+  of RE4's light settings the Minecraft lights could use (and the lights Minecraft sent), and what RE4 offers
+  for adding objects to its world. **Record real hits** logs which RE4 functions run when
   RE4 itself hits an enemy, and in which order. RE4's own hits on enemies are captured all the time (what the
   hit carries, and the enemy's behavior states right after: its damage reactions). **Live tests** (Look,
   Walk, Flinch, Attack) try RE4's own functions on the nearest enemy for a few seconds and measure by
@@ -165,6 +181,8 @@ Copy the `.lua` files into `<RE4 game folder>\reframework\autorun\`. Settings: p
   death (see above), flinching, and enemies looking at the mobs fighting them.
 - `minecraft_native.lua`: real RE4 mobs, your character and built blocks (see above). Status and errors: Script
   Generated UI → Minecraft Real Mobs.
+- `minecraft_lights.lua`: Minecraft's light blocks as RE4 lights (see above). Status, which light settings work
+  and errors: Script Generated UI → Minecraft → Minecraft Lights.
 - `minecraft_blocks.lua`: shows the blocks you build in Minecraft as 3D cubes in RE4. **Right-click** places
   (Minecraft's own "use"), **left-click** breaks (Minecraft's mining). Minecraft's player looks where Leon
   looks, and is pulled back next to Leon when RE4 walls stop him. **F9** re-anchors the two worlds.

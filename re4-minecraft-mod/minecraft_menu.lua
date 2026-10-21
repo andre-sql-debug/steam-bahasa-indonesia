@@ -22,6 +22,7 @@ local QUICK = {
     { "gameplay", "enemies_look_at_mobs", "Enemies look at the Minecraft mobs fighting them" },
     { "gameplay", "enemies_attack_mobs", "Enemies swing at the Minecraft mobs fighting them" },
     { "native", "enabled", "Real RE4 mobs (experimental)" },
+    { "lights", "enabled", "Minecraft lights light RE4 (experimental)" },
     { "first_person", "first_person", "Minecraft camera (F5 views)" },
     { "cutscenes", "enabled", "Your Minecraft character plays Leon in cutscenes" },
     { "hud", "smart_hide_re4_ui", "Hide RE4's HUD (keeps its prompts)" },

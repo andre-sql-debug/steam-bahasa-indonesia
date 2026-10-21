@@ -24,6 +24,8 @@ import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.projectile.AbstractArrow;
 import net.minecraft.world.item.CrossbowItem;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.EmptyBlockGetter;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.phys.AABB;
@@ -42,15 +44,18 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 
 /**
  * Bridge between Minecraft and the RE4 REFramework scripts, through JSON files in RE4's
  * reframework\data folder:
- * - minecraft_bridge.json (written here, every tick): HUD state, movement, attacks, looked-at block.
+ * - minecraft_bridge.json (written here, every tick): HUD state, movement, attacks, looked-at block, light blocks.
  * - minecraft_blocks.json (written here, when blocks change): blocks around the player and their colors.
  * - minecraft_textures.json (written here, when new items show up): item textures for the HUD.
  * - minecraft_bridge_input.json (written by RE4): keys, look direction, hotbar slot, clicks.
@@ -968,6 +973,8 @@ public class Re4Bridge implements ClientModInitializer {
         state.addProperty("terrain_boxes", Re4Terrain.boxCount());
         state.addProperty("authority", Re4Terrain.enforced() && covered);
         state.addProperty("sync_done", syncDone);
+        // Torches, lanterns, glowstone... near the player, for RE4's own lights (minecraft_lights.lua)
+        state.addProperty("lights", describeLights(player));
 
         // Damage Minecraft did to RE4's enemies through their stand-ins (totals per enemy)
         JsonObject enemyDamage = new JsonObject();
@@ -1064,6 +1071,9 @@ public class Re4Bridge implements ClientModInitializer {
 
     // Blocks near the player, every tick, for drawing them into RE4 with Minecraft's own block models
     private static volatile List<BlockPos> nearbyBlocks = List.of();
+    // The light-giving ones among them (torches, lanterns, glowstone...), for RE4's own lights (minecraft_lights.lua)
+    private static final List<BlockPos> lightBlocks = new ArrayList<>();
+    private static final int MAX_LIGHTS = 24;
 
     public static List<BlockPos> nearbyBlocks() {
         return nearbyBlocks;
@@ -1073,19 +1083,89 @@ public class Re4Bridge implements ClientModInitializer {
         LocalPlayer player = mc.player;
         int minY = scanMinY(player);
         BlockPos center = player.blockPosition();
-        List<BlockPos> found = new java.util.ArrayList<>();
+        List<BlockPos> found = new ArrayList<>();
+        lightBlocks.clear();
         BlockPos.MutableBlockPos p = new BlockPos.MutableBlockPos();
         for (int x = -BLOCK_SCAN_RADIUS; x <= BLOCK_SCAN_RADIUS; x++) {
             for (int z = -BLOCK_SCAN_RADIUS; z <= BLOCK_SCAN_RADIUS; z++) {
                 for (int y = minY; y <= minY + BLOCK_SCAN_HEIGHT; y++) {
                     p.set(center.getX() + x, y, center.getZ() + z);
-                    if (!player.level().getBlockState(p).isAir()) {
-                        found.add(p.immutable());
+                    BlockState state = player.level().getBlockState(p);
+                    if (!state.isAir()) {
+                        BlockPos pos = p.immutable();
+                        found.add(pos);
+                        if (state.getLightEmission() > 0) {
+                            lightBlocks.add(pos);
+                        }
                     }
                 }
             }
         }
         nearbyBlocks = found;
+    }
+
+    // How a kind of light block lights RE4: its colour, how high in the block the light is, and whether the block is a
+    // full cube around it (glowstone, sea lanterns: RE4 must not let that cube's shadow swallow the light)
+    private record LightKind(int rgb, double lift, boolean inside) {
+    }
+
+    private static final Map<Block, LightKind> lightKinds = new HashMap<>();
+
+    private static LightKind lightKind(BlockState state) {
+        return lightKinds.computeIfAbsent(state.getBlock(), block -> {
+            String n = BuiltInRegistries.BLOCK.getKey(block).getPath();
+            int rgb;
+            if (n.contains("soul")) {
+                rgb = 0x58D2FF;   // soul torches, lanterns, campfires and fire: blue-cyan
+            } else if (n.startsWith("redstone_") && !n.equals("redstone_lamp")) {
+                rgb = 0xFF2A18;   // redstone torches and lit ore: red
+            } else if (n.contains("torch") || n.contains("lantern") && !n.equals("sea_lantern") || n.contains("campfire")
+                    || n.equals("fire") || n.contains("lava") || n.equals("magma_block")) {
+                rgb = 0xFF9A3C;   // torches, lanterns, campfires, jack o'lanterns, fire, lava: warm orange
+            } else if (n.equals("glowstone") || n.equals("shroomlight") || n.equals("redstone_lamp") || n.contains("froglight")
+                    || n.contains("glow") || n.contains("cave_vines")) {
+                rgb = 0xFFE6A0;   // glowstone, shroomlights, lamps, glow berries: pale yellow
+            } else if (n.equals("sea_lantern") || n.equals("end_rod") || n.equals("beacon") || n.equals("conduit")
+                    || n.contains("sea_pickle")) {
+                rgb = 0xDCF0FF;   // sea lanterns, end rods: cool white
+            } else if (n.contains("portal") || n.contains("crying_obsidian") || n.contains("respawn_anchor") || n.contains("amethyst")) {
+                rgb = 0xB46CFF;   // nether portals, crying obsidian: purple
+            } else {
+                rgb = 0xFFD7AA;   // lit furnaces, smokers, candles and the rest: warm white
+            }
+            // a torch's flame is above the block's middle
+            return new LightKind(rgb, n.contains("torch") ? 0.7 : 0.5, state.isSolidRender(EmptyBlockGetter.INSTANCE, BlockPos.ZERO));
+        });
+    }
+
+    // The light-giving blocks nearest the player as "x,y,z,level,RRGGBB,inside;" (RE4 coordinates of the light's spot,
+    // Minecraft's light level 1-15, its colour, 1 for a light inside a full block), for RE4's own lights
+    private static String describeLights(LocalPlayer player) {
+        if (lightBlocks.isEmpty()) {
+            return "";
+        }
+        Vec3 at = player.position();
+        lightBlocks.sort(Comparator.comparingDouble(pos -> pos.distToCenterSqr(at)));
+        StringBuilder out = new StringBuilder();
+        int n = 0;
+        for (BlockPos pos : lightBlocks) {
+            if (n >= MAX_LIGHTS) {
+                break;
+            }
+            BlockState state = player.level().getBlockState(pos);
+            int level = state.getLightEmission();
+            if (level <= 0) {
+                continue;
+            }
+            LightKind kind = lightKind(state);
+            Vec3 re4 = Re4Terrain.toRe4(pos.getX() + 0.5, pos.getY() + kind.lift(), pos.getZ() + 0.5);
+            if (re4 == null) {
+                return "";   // the two worlds aren't lined up yet
+            }
+            out.append(String.format(Locale.ROOT, "%.3f,%.3f,%.3f,%d,%06X,%d;", re4.x, re4.y, re4.z, level, kind.rgb(), kind.inside() ? 1 : 0));
+            n++;
+        }
+        return out.toString();
     }
 
     private static void writeBlocks(Minecraft mc) throws IOException {

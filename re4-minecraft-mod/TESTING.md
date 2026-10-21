@@ -1,4 +1,4 @@
-# In-game test checklist (about 15 minutes)
+# In-game test checklist (about 17 minutes)
 
 Close RE4 and Minecraft, run `install.bat`, then start Minecraft (your RE4 profile, Superflat world) and RE4.
 In RE4 press **Insert** → **Script Generated UI** → **Minecraft**. Everything below is in that menu.
@@ -29,10 +29,17 @@ In RE4 press **Insert** → **Script Generated UI** → **Minecraft**. Everythin
   the files, the Loose File Loader is off: close RE4, run `install.bat` again.
 - If anything looks wrong or RE4 misbehaves, untick it again.
 
-## 5. Play a while (as long as you like)
+## 5. Minecraft lights (2 min)
+- Tick **Minecraft lights light RE4 (experimental)**. In a dark spot (a house at night, a cave) place a torch on the
+  floor near Leon, then a soul lantern and a glowstone a few steps away. Screenshot: does each light the floor, the
+  walls and Leon around it, in its colour (orange, blue, pale yellow)? Break the torch: does its light go out?
+- The **Minecraft Lights** section says which RE4 light settings work. Screenshot it. Untick it again if RE4
+  misbehaves.
+
+## 6. Play a while (as long as you like)
 - Play on through chapter 1. Whenever something is wrong (stuck in RE4's turn, a door or ladder that
   doesn't work, a cutscene without your character), note roughly when.
 
-## 6. Send
+## 7. Send
 - **Make support zip** (top of the menu). It saves the diagnostics report first and puts everything in one
   zip on your Desktop; the menu shows the file name. Send that zip and your screenshots.

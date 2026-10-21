@@ -92,6 +92,7 @@ MinecraftRE4Menu.settings.gameplay = GAMEPLAY
 re.on_draw_ui(function() if not MinecraftRE4Menu.present then draw_ui() end end)
 ''')
 L.execute(open(os.path.join(REPO, "minecraft_native.lua")).read())
+L.execute(open(os.path.join(REPO, "minecraft_lights.lua")).read())
 
 drawn = ui()
 check("without the menu script: each script draws its own section",
@@ -100,6 +101,7 @@ check("without the menu script: each script draws its own section",
 FILES["minecraft_settings.json"] = json.dumps({
     "gameplay": {"flinch": False, "fly_speed": "fast", "gone": 1, "show_debug": True},
     "native": {"enabled": True},
+    "lights": {"enabled": True, "brightness": 1.5},
     "nosuchscript": {"x": 1}})
 L.execute(open(os.path.join(REPO, "minecraft_menu.lua")).read())
 check("menu marks itself present", G.MinecraftRE4Menu.present is True)
@@ -110,12 +112,16 @@ check("a saved value of the wrong kind is ignored", gp.fly_speed == 10.9, gp.fly
 check("debug switches are not restored", gp.show_debug is False)
 check("unknown saved keys are not added", gp.gone is None)
 check("other scripts' saved settings too (native)", G.MinecraftRE4Menu.settings.native.enabled is True)
+check("Minecraft lights: saved settings put back", G.MinecraftRE4Lights.settings.enabled is True
+      and G.MinecraftRE4Lights.settings.brightness == 1.5)
 
 drawn = ui()
 nodes = [d for d in drawn if d.startswith("node:")]
 check("one Minecraft menu, sections inside in order", nodes[:3] == ["node:Minecraft", "node:Minecraft Gameplay", "node:Minecraft Real Mobs"], nodes)
 check("scripts don't draw their own copy when the menu is there", nodes.count("node:Minecraft Gameplay") == 1, nodes)
-check("quick settings shown", "check:Shared death (Minecraft and Leon die together)" in drawn and "check:Real RE4 mobs (experimental)" in drawn)
+check("quick settings shown", "check:Shared death (Minecraft and Leon die together)" in drawn and "check:Real RE4 mobs (experimental)" in drawn
+      and "check:Minecraft lights light RE4 (experimental)" in drawn)
+check("Minecraft lights section in the menu, after the real mobs", nodes.index("node:Minecraft Lights") > nodes.index("node:Minecraft Real Mobs"), nodes)
 check("not connected line without Minecraft", any("not connected" in d for d in drawn), drawn[:4])
 
 before = len([d for d in DUMPS if d == "minecraft_settings.json"])

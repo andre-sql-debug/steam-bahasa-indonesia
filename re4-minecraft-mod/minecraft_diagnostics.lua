@@ -1564,6 +1564,14 @@ write_report = function()
             shown = MinecraftRE4Native.debug.shown, kept = MinecraftRE4Native.debug.pooled,
             errors = MinecraftRE4Native.debug.errors, quat_order = MinecraftRE4Native.state.quat_order,
             session = MinecraftRE4Native.state.session } or "minecraft_native.lua not running",
+        -- Minecraft's torches as RE4 lights: which of RE4's light setters worked, and what a light reads back
+        minecraft_lights = type(MinecraftRE4Lights) == "table" and {
+            enabled = MinecraftRE4Lights.settings.enabled, status = MinecraftRE4Lights.debug.status,
+            brightness = MinecraftRE4Lights.settings.brightness, shadows = MinecraftRE4Lights.settings.shadows,
+            from_minecraft = MinecraftRE4Lights.debug.sent, shown = MinecraftRE4Lights.debug.shown,
+            made = MinecraftRE4Lights.debug.objects, setters = MinecraftRE4Lights.debug.setters,
+            values = MinecraftRE4Lights.debug.values, errors = MinecraftRE4Lights.debug.errors }
+            or "minecraft_lights.lua not running",
         flinch = type(MinecraftRE4Hit) == "table" and { method = MinecraftRE4Hit.method, status = MinecraftRE4Hit.status }
             or "minecraft_gameplay.lua not running",
         hit_and_reaction_types = type_dumps(),
@@ -1571,7 +1579,8 @@ write_report = function()
         minecraft = type(bridge) == "table" and { in_world = bridge.in_world, re4_control = bridge.re4_control,
             overlay = bridge.overlay, authority = bridge.authority, terrain_boxes = bridge.terrain_boxes,
             sync_done = bridge.sync_done, screen_open = bridge.screen_open, game_mode = bridge.game_mode,
-            camera = bridge.camera, anchor = bridge.anchor, enemy_damage = bridge.enemy_damage, pos = bridge.pos } or "no minecraft_bridge.json",
+            camera = bridge.camera, anchor = bridge.anchor, enemy_damage = bridge.enemy_damage, pos = bridge.pos,
+            lights = bridge.lights } or "no minecraft_bridge.json",
         terrain = type(terrain) == "table" and { seq = terrain.seq, epoch = terrain.epoch, request_epoch = terrain.request_epoch,
             radius = terrain.radius, cells = terrain.cells and select(2, terrain.cells:gsub(";", ";")) or 0,
             enemies = terrain.enemies } or "no minecraft_terrain.json",

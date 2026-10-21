@@ -173,11 +173,37 @@ def scenario_retest_after_off():
     check("no Lua errors", not w.errors(), w.errors()[:2])
 
 
+def scenario_report_lights():
+    print("\n== Diagnostics report: Minecraft lights (which RE4 light setters worked, lights shown) ==")
+    w = World()
+    res = w.L.eval("load")(open(REPO + "minecraft_lights.lua", encoding="utf-8").read(), "@minecraft_lights.lua")
+    (res[0] if isinstance(res, tuple) else res)()
+    w.lua("json.dump_file = function(name, t) FAKE.files[name] = t; return true end")
+    # (the fake's type definitions have no fields, which the report's type dumps list)
+    w.lua("""local find = sdk.find_type_definition
+sdk.find_type_definition = function(n)
+    local td = find(n)
+    if type(td) == "table" and td.get_fields == nil then td.get_fields = function() return {} end end
+    return td
+end""")
+    w.lua("MinecraftRE4Lights.debug.setters.set_Color = 'works'; MinecraftRE4Lights.debug.setters.set_Radius = 'failed'")
+    w.step(5)
+    w.press("Save report now")
+    w.step(3)
+    report = w.F.files["minecraft_diagnostics.json"]
+    lights = report and report["minecraft_lights"]
+    check("report written with a Minecraft lights section", lights is not None and lights["enabled"] is False
+          and lights["status"] == "off" and lights["setters"]["set_Color"] == "works" and lights["setters"]["set_Radius"] == "failed",
+          lights and dict(lights.items()))
+    check("no Lua errors", not w.errors(), w.errors()[:2])
+
+
 def main():
     scenario_fresh_works()
     scenario_template_only()
     scenario_nothing_reacts()
     scenario_retest_after_off()
+    scenario_report_lights()
     fails = [r for r in RESULTS if not r[1]]
     print(f"\n{len(RESULTS) - len(fails)} passed, {len(fails)} failed")
     for name, _, d in fails:

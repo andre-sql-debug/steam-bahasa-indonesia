@@ -31,6 +31,8 @@ REPORT_DIR = os.path.join(HERE, ".report")
 LUA_SUITES = [
     ("lua: real RE4 mobs spawner", [os.path.join(HERE, "lua", "native", "harness.py"), os.path.join(REPO, "minecraft_native.lua")],
      r"FAILS (\d+)"),
+    ("lua: Minecraft lights as RE4 lights", [os.path.join(HERE, "lua", "lights", "harness.py"), os.path.join(REPO, "minecraft_lights.lua")],
+     r"FAILS (\d+)"),
     ("lua: block stand-ins skip RE4's real blocks", [os.path.join(HERE, "lua", "blocks", "harness.py"),
                                                       os.path.join(REPO, "minecraft_blocks.lua")], r"FAILS (\d+)"),
     ("lua: enemies look at mobs", [os.path.join(HERE, "lua", "attention", "harness.py"), os.path.join(REPO, "minecraft_gameplay.lua")],
@@ -78,7 +80,8 @@ def main():
                 started = mc.start(os.path.join(MOD, "run", "config", "re4bridge.txt"), os.path.join(DATA, "minecraft_bridge.json"))
                 results.append({"name": "minecraft starts", "passed": started, "details": {}})
                 if started:
-                    re4 = FakeRE4(DATA, [os.path.join(REPO, "minecraft_control.lua"), os.path.join(REPO, "minecraft_terrain.lua")])
+                    re4 = FakeRE4(DATA, [os.path.join(REPO, "minecraft_control.lua"), os.path.join(REPO, "minecraft_terrain.lua"),
+                                         os.path.join(REPO, "minecraft_lights.lua")])
                     # Minecraft connects, anchors, gets RE4's terrain and takes commands (not a fixed time: it varies).
                     # "Loading terrain" can stay up to 30 s (it waits for a world chunk drawn, and the overlay draws
                     # none): typed commands would go to it, so wait until no screen is open

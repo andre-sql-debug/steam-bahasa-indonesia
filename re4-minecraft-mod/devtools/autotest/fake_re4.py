@@ -58,7 +58,24 @@ enemy.get_address=function(self) return 123456789 end
 local enemies=obj({get_Count=function() return 1 end, get_Item=function(i) return enemy end})
 local cm=obj({getPlayerContextRef=function() return ctx end, get_EnemyContextList=function() return enemies end})
 local layer_field={is_static=function() return true end, get_data=function() return 3 end, get_name=function() return "Terrain" end}
+-- Objects the scripts make (minecraft_lights.lua): a game object with a transform and one component that keeps
+-- what its setters were given
+MADE={}
+local function make_go(name)
+  local go
+  local tr=obj({set_Position=function(p) go.pos=p end})
+  local comp={values={}}
+  comp.call=function(self,m,v) comp.values[m]=v end
+  comp.add_ref=function(self) return self end
+  go=obj({name=name, draw=true, [".ctor"]=function() end, get_Transform=function() return tr end, set_DrawSelf=function(b) go.draw=b end,
+          ["createComponent(System.Type)"]=function(t) go.comp=comp go.type=t return comp end,
+          ["destroy(via.GameObject)"]=function() go.destroyed=true end})
+  MADE[#MADE+1]=go
+  return go
+end
+local go_create={call=function(self,_,name) return make_go(name) end}
 sdk={find_type_definition=function(n) if n=="via.physics.System" then return {get_method=function() return method end} end
+       if n=="via.GameObject" then return {get_method=function() return go_create end} end
        return {get_fields=function() return {layer_field} end} end,
      get_native_singleton=function() return {} end, create_instance=function(n) if n:find("Query") then return make_query() end return make_result() end,
      get_managed_singleton=function() return cm end, get_primary_camera=function() return CAMERA end, game_namespace=function(n) return "chainsaw."..n end, typeof=function(n) return n end}
