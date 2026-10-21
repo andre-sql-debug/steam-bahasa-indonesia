@@ -236,6 +236,11 @@ public final class Re4Native {
         if (shown) {
             nativeEntities.add(currentEntity.getId());
         }
+        // Hit: Minecraft also draws its red-flashing copy over RE4's for that moment
+        if (shown && currentEntity instanceof net.minecraft.world.entity.LivingEntity living
+                && (living.hurtTime > 0 || living.deathTime > 0)) {
+            return false;
+        }
         return shown;
     }
 
@@ -275,13 +280,16 @@ public final class Re4Native {
         byFiles.put(key, export);
         forPart.put(texture, export);
         ResourceLocation location = ResourceLocation.tryParse(texture);
-        worker.execute(() -> writeExport(export, meshName, texName, location, texture, positions, normals, uvs));
+        // Textures made at runtime (player skins) aren't in the resources: read them from the graphics card now
+        int[] gpuImage = location != null && Minecraft.getInstance().getResourceManager().getResource(location).isEmpty()
+                ? readGpuTexture(location) : null;
+        worker.execute(() -> writeExport(export, meshName, texName, location, texture, positions, normals, uvs, gpuImage));
         return null;
     }
 
     // Export thread: the part's model, its texture and material, then tell RE4 about it
     private static void writeExport(Export export, String meshName, String texName, ResourceLocation location,
-                                    String texture, float[] positions, float[] normals, float[] uvs) {
+                                    String texture, float[] positions, float[] normals, float[] uvs, int[] gpuImage) {
         try {
             Files.createDirectories(nativesFolder);
             Path mesh = nativesFolder.resolve(meshName + ".mesh." + Re4NativeFiles.MESH_VERSION);
@@ -291,7 +299,7 @@ public final class Re4Native {
             Path tex = nativesFolder.resolve(texName + ".tex." + Re4NativeFiles.TEX_VERSION);
             Path mdf = nativesFolder.resolve(texName + ".mdf2." + Re4NativeFiles.MDF_VERSION);
             if (!Files.exists(tex) || !Files.exists(mdf)) {
-                int[] image = readTexture(location);   // width, height, then RGBA pixels
+                int[] image = gpuImage != null ? gpuImage : readTexture(location);   // width, height, then RGBA pixels
                 if (image == null) {
                     failedTextures.add(texture);
                     Re4Bridge.LOGGER.info("RE4 Bridge: texture {} can't be read; that part stays drawn by Minecraft", texture);
@@ -334,6 +342,41 @@ public final class Re4Native {
                 return out;
             }
         } catch (IOException e) {
+            return null;
+        }
+    }
+
+    // Render thread: a loaded texture's pixels straight from OpenGL (width, height, then RGBA)
+    private static int[] readGpuTexture(ResourceLocation location) {
+        try {
+            net.minecraft.client.renderer.texture.AbstractTexture tex = Minecraft.getInstance().getTextureManager().getTexture(location);
+            if (tex == null) {
+                return null;
+            }
+            com.mojang.blaze3d.systems.RenderSystem.bindTexture(tex.getId());
+            int w = org.lwjgl.opengl.GL11.glGetTexLevelParameteri(org.lwjgl.opengl.GL11.GL_TEXTURE_2D, 0, org.lwjgl.opengl.GL11.GL_TEXTURE_WIDTH);
+            int h = org.lwjgl.opengl.GL11.glGetTexLevelParameteri(org.lwjgl.opengl.GL11.GL_TEXTURE_2D, 0, org.lwjgl.opengl.GL11.GL_TEXTURE_HEIGHT);
+            if (w <= 0 || h <= 0 || w > 4096 || h > 4096) {
+                return null;
+            }
+            java.nio.ByteBuffer pixels = org.lwjgl.system.MemoryUtil.memAlloc(w * h * 4);
+            try {
+                org.lwjgl.opengl.GL11.glPixelStorei(org.lwjgl.opengl.GL11.GL_PACK_ALIGNMENT, 1);
+                org.lwjgl.opengl.GL11.glGetTexImage(org.lwjgl.opengl.GL11.GL_TEXTURE_2D, 0, org.lwjgl.opengl.GL11.GL_RGBA,
+                        org.lwjgl.opengl.GL11.GL_UNSIGNED_BYTE, pixels);
+                int[] out = new int[2 + w * h];
+                out[0] = w;
+                out[1] = h;
+                for (int i = 0; i < w * h; i++) {
+                    int r = pixels.get(i * 4) & 0xFF, g = pixels.get(i * 4 + 1) & 0xFF;
+                    int b = pixels.get(i * 4 + 2) & 0xFF, a = pixels.get(i * 4 + 3) & 0xFF;
+                    out[2 + i] = (r << 24) | (g << 16) | (b << 8) | a;
+                }
+                return out;
+            } finally {
+                org.lwjgl.system.MemoryUtil.memFree(pixels);
+            }
+        } catch (Exception e) {
             return null;
         }
     }
