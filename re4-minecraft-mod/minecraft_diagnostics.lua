@@ -508,7 +508,7 @@ end
 -- Our own hits (minecraft_gameplay.lua building a hit for a Minecraft attack) are not RE4's
 local function our_own_hit()
     local H = MinecraftRE4Hit
-    return type(H) == "table" and H.building == true
+    return type(H) == "table" and (H.building == true or H.applying == true)
 end
 
 -- RE4's real hits are captured all the time (they are rare, so this costs nothing)
@@ -522,29 +522,105 @@ pcall(function()
     end, function(retval) return retval end)
 end)
 
+-- RE4's real damage to an enemy (its knife hits ran HitPoint.addDamage, not callbackDamageHit): watch what
+-- the enemy does next too, so the report shows the names of RE4's damage reactions
+local function on_real_damage(args)
+    local hp = sdk.to_managed_object(args[2])
+    local hp_address = hp and address_of(hp)
+    if hp_address == nil then return end
+    local cm = sdk.get_managed_singleton(sdk.game_namespace("CharacterManager"))
+    local list = cm and try_call(cm, "get_EnemyContextList")
+    local count = list and try_call(list, "get_Count") or 0
+    for i = 0, count - 1 do
+        local e = try_call(list, "get_Item", i)
+        local ehp = e and try_call(e, "get_HitPoint")
+        if ehp ~= nil and address_of(ehp) == hp_address then
+            local body = try_call(e, "get_BodyGameObject")
+            local a = body and address_of(body)
+            if a ~= nil and reaction_watch[a] == nil then
+                local name = tostring(try_call(body, "get_Name") or "?")
+                reaction_watch[a] = { enemy = e, name = name, until_frame = frames + 90, last = nil }
+                if #reaction_log < MAX_REACTION_LOG then
+                    reaction_log[#reaction_log + 1] = string.format("[%d] RE4 damage on %s (addDamage)", frames, name)
+                end
+            end
+            return
+        end
+    end
+end
+
+pcall(function()
+    local td = sdk.find_type_definition("chainsaw.HitPoint")
+    for _, m in ipairs(td and td:get_methods() or {}) do
+        local ok, n = pcall(function() return m:get_name() end)
+        if ok and n == "addDamage" then
+            sdk.hook(m, function(args)
+                if our_own_hit() then return end
+                pcall(on_real_damage, args)
+            end, function(retval) return retval end)
+        end
+    end
+end)
+
+-- Also every other hit-sounding function of the types between a collision and an enemy's reaction (RE4's
+-- real knife hits ran HitController.poolDamage and HitPoint.addDamage, but none of the callbacks above)
+local HIT_HOOK_TYPES = { "chainsaw.HitController", "chainsaw.Ch1c0BodyHitDriverCommon", "chainsaw.CharacterBodyHitDriver",
+    "chainsaw.Ch1c0BodyUpdaterCommon", "chainsaw.EnemyBodyUpdater", "chainsaw.CharacterBodyUpdater",
+    "chainsaw.HitPoint", "chainsaw.EnemyBaseContext" }
+local HIT_HOOK_WORDS = { "damage", "wince", "hit", "react", "stagger", "knock", "flinch", "pool", "blow", "stun" }
+local MAX_PATTERN_HOOKS, MAX_SEQUENCE = 150, 300
+local hook_sequence = {}   -- the order hit functions first ran in while recording (each one's first 3 calls)
+
+local function hook_method(type_name, m)
+    local ok, n = pcall(function() return m:get_name() end)
+    local okp, params = pcall(function() return m:get_num_params() end)
+    local key = type_name .. "." .. tostring(n) .. "/" .. tostring(okp and params or "?")
+    if not ok or hooked[key] then return false end
+    hooked[key] = true
+    pcall(function()
+        sdk.hook(m, function(args)
+            if not recording or our_own_hit() then return end
+            local count = (hook_counts[key] or 0) + 1
+            hook_counts[key] = count
+            if hook_args[key] == nil then hook_args[key] = arg_types(args) end
+            if count <= 3 and #hook_sequence < MAX_SEQUENCE then
+                hook_sequence[#hook_sequence + 1] = string.format("[%d] %s", frames, key)
+            end
+        end, function(retval) return retval end)
+    end)
+    return true
+end
+
 local function hook_all()
     for type_name, names in pairs(HIT_HOOKS) do
         local td = sdk.find_type_definition(type_name)
         for _, m in ipairs(td and td:get_methods() or {}) do
             local ok, n = pcall(function() return m:get_name() end)
-            local wanted = false
             for _, w in ipairs(names) do
-                if n == w then wanted = true end
-            end
-            local okp, params = pcall(function() return m:get_num_params() end)
-            local key = type_name .. "." .. tostring(n) .. "/" .. tostring(okp and params or "?")
-            if ok and wanted and not hooked[key] then
-                hooked[key] = true
-                pcall(function()
-                    sdk.hook(m, function(args)
-                        if not recording or our_own_hit() then return end
-                        hook_counts[key] = (hook_counts[key] or 0) + 1
-                        if hook_args[key] == nil then hook_args[key] = arg_types(args) end
-                    end, function(retval) return retval end)
-                end)
+                if ok and n == w then hook_method(type_name, m) end
             end
         end
     end
+    local added = 0
+    for _, type_name in ipairs(HIT_HOOK_TYPES) do
+        local td = sdk.find_type_definition(type_name)
+        for _, m in ipairs(td and td:get_methods() or {}) do
+            local ok, n = pcall(function() return m:get_name() end)
+            local l = ok and type(n) == "string" and n:lower() or ""
+            -- getters/setters share machine code with unrelated ones, and per-frame updates would flood the log
+            local plain = l == "" or l:find("^get_") or l:find("^set_") or l:find("^%.") or l:find("^<")
+                or l:find("^update") or l:find("^is")
+            if not plain and added < MAX_PATTERN_HOOKS then
+                for _, w in ipairs(HIT_HOOK_WORDS) do
+                    if l:find(w, 1, true) then
+                        if hook_method(type_name, m) then added = added + 1 end
+                        break
+                    end
+                end
+            end
+        end
+    end
+    log("hooked " .. added .. " more hit functions")
 end
 
 ------------------------------------------------------------------------------
@@ -553,6 +629,7 @@ end
 
 local test_results = {}
 local pending_test = nil
+local spawn_test           -- the spawn tests (defined further down)
 
 local function nearest_live_enemy()
     local cm = sdk.get_managed_singleton(sdk.game_namespace("CharacterManager"))
@@ -608,6 +685,17 @@ local live_results = {}
 local LOOK_BASE_FRAMES, LOOK_FRAMES = 45, 90
 local WALK_BASE_FRAMES, WALK_FRAMES = 60, 180
 local FLINCH_BASE_FRAMES, FLINCH_FRAMES = 45, 90
+local FLINCH_SETTLE_FRAMES = 90    -- before each hit, wait at most this long for the last reaction to end
+local FLINCH_REACT_FRAMES = 12     -- a reaction starts within this many frames of the hit
+
+-- Does this animation/behavior state look like a damage reaction (by its name)?
+local function flinch_damage_like(state)
+    local l = tostring(state or ""):lower()
+    for _, word in ipairs({ "dam", "dmg", "wince", "hit", "stagger", "flinch", "knock", "react", "stun" }) do
+        if l:find(word, 1, true) then return true end
+    end
+    return false
+end
 
 -- A look test must never leave the enemy staring at its point
 local function release_look()
@@ -854,61 +942,89 @@ local function step_live()
         end
     elseif t.kind == "flinch" then
         -- First a while without any hit (does its animation change by itself?), then one Minecraft-style hit
-        -- per way of building it, FLINCH_FRAMES apart. The enemy is kept at full health meanwhile.
+        -- per way of building it, each once the enemy is out of any damage reaction, watched FLINCH_FRAMES.
+        -- Only a change into a damage reaction counts; the enemy is kept at full health meanwhile, and how
+        -- much health RE4's own hit code took for our hit is written down.
         local state = motion_state(enemy)
         if t.frame == 1 then
             t.last_state, t.base_changes = state, 0
             t.result.hp_before = try_call(hp, "get_CurrentHitPoint")
             t.max = try_call(hp, "get_DefaultHitPoint")
+            t.index, t.fi, t.settle = 1, 0, 0
         end
+        local cur = nil
         if t.frame <= FLINCH_BASE_FRAMES then
             if t.frame > 1 and state ~= t.last_state then
                 t.base_changes = t.base_changes + 1
                 t.last_state = state
             end
-        else
-            local f = t.frame - FLINCH_BASE_FRAMES - 1
-            local index, fi = f // FLINCH_FRAMES + 1, f % FLINCH_FRAMES
-            if index > #t.methods then
-                if t.result.hp_before ~= nil then try_call(hp, "set_CurrentHitPoint", t.result.hp_before) end
-                t.result.changes_before_hits = t.base_changes
-                t.result.per_method = t.per
-                local works = nil
-                for _, m in ipairs(t.per) do
-                    if m.reacted and works == nil then works = m.method end
-                end
-                if works ~= nil then
-                    t.result.result = "the enemy reacted to the '" .. works .. "' hit: Minecraft hits now make enemies flinch"
-                    local H = MinecraftRE4Hit
-                    H.method = works
-                    local when = os.date and os.date("%Y-%m-%d %H:%M") or "?"
-                    H.status = "on (" .. works .. ", tested " .. when .. ")"
-                    pcall(json.dump_file, "minecraft_flinch.json", { works = true, method = works, time = when })
-                else
-                    t.result.result = "no clear reaction to any of the hits (send the report; try again on an enemy that is standing or walking)"
-                end
-                finish_live()
-                return
+        elseif t.index > #t.methods then
+            if t.result.hp_before ~= nil then try_call(hp, "set_CurrentHitPoint", t.result.hp_before) end
+            t.result.changes_before_hits = t.base_changes
+            t.result.per_method = t.per
+            local works, maybe = {}, {}
+            for _, m in ipairs(t.per) do
+                if m.reacted then works[#works + 1] = m.method elseif m.maybe then maybe[#maybe + 1] = m.method end
             end
-            local cur = t.per[index]
-            if fi == 0 then
-                cur = { method = t.methods[index], changes = {}, state_before = state }
-                t.per[index] = cur
+            if #works > 0 then
+                t.result.result = "the enemy reacted to the '" .. table.concat(works, "', '")
+                    .. "' hit: Minecraft hits now make enemies flinch"
+                local H = MinecraftRE4Hit
+                H.method, H.methods, H.failures = works[1], works, 0
+                local when = os.date and os.date("%Y-%m-%d %H:%M") or "?"
+                H.status = "on (" .. table.concat(works, ", ") .. "; tested " .. when .. ")"
+                pcall(json.dump_file, "minecraft_flinch.json", { works = true, method = works[1], methods = works, time = when })
+            elseif #maybe > 0 then
+                t.result.result = "the enemy's animation changed after the '" .. table.concat(maybe, "', '")
+                    .. "' hit, but not into a damage reaction: left off (send the report)"
+            else
+                t.result.result = "no clear reaction to any of the hits (send the report; try again on an enemy that is standing or walking)"
+            end
+            finish_live()
+            return
+        elseif t.per[t.index] == nil then
+            -- Before the next hit: let the last reaction end, so its end isn't taken for this hit's reaction
+            if flinch_damage_like(state) and t.settle < FLINCH_SETTLE_FRAMES then
+                t.settle = t.settle + 1
+            else
+                cur = { method = t.methods[t.index], changes = {}, state_before = state, waited = t.settle }
+                t.per[t.index] = cur
+                t.fi, t.settle = 0, 0
                 t.last_state = state
-                if t.max ~= nil then try_call(hp, "set_CurrentHitPoint", t.max) end
-                local ok, done, msg = pcall(MinecraftRE4Hit.flinch, enemy, cur.method, me)
-                cur.call = (ok and done) and "called" or ("failed: " .. tostring(ok and msg or done))
-            elseif state ~= t.last_state then
-                cur.changes[#cur.changes + 1] = string.format("[%d] %s", fi, state)
+                if flinch_damage_like(state) then
+                    cur.call = "skipped: the enemy was still reacting to the hit before (can't tell)"
+                    t.index = t.index + 1
+                else
+                    if t.max ~= nil then try_call(hp, "set_CurrentHitPoint", t.max) end
+                    local ok, done, msg = pcall(MinecraftRE4Hit.flinch, enemy, cur.method, me)
+                    cur.call = (ok and done) and "called" or ("failed: " .. tostring(ok and msg or done))
+                    cur.hp_after_call = try_call(hp, "get_CurrentHitPoint")
+                end
+            end
+        else
+            cur = t.per[t.index]
+            t.fi = t.fi + 1
+            if state ~= t.last_state then
+                cur.changes[#cur.changes + 1] = string.format("[%d] %s", t.fi, state)
                 t.last_state = state
-                local damage_like = state:lower():find("dam") or state:lower():find("wince") or state:lower():find("hit")
-                    or state:lower():find("stagger") or state:lower():find("flinch") or state:lower():find("knock")
-                if fi <= 12 and cur.call == "called" and (t.base_changes == 0 or damage_like) then cur.reacted = true end
+                local damage_like = flinch_damage_like(state)
+                if t.fi <= FLINCH_REACT_FRAMES and cur.call == "called" then
+                    if damage_like and not flinch_damage_like(cur.state_before) then
+                        cur.reacted = true
+                    elseif t.base_changes == 0 then
+                        cur.maybe = true   -- changed right after the hit, but not into a damage reaction
+                    end
+                end
                 if damage_like then cur.damage_state = state end
             end
-            -- RE4 may apply the hit's damage a few frames later: keep the enemy alive until the end
-            local now = try_call(hp, "get_CurrentHitPoint")
-            if t.max ~= nil and now ~= nil and now < t.max then try_call(hp, "set_CurrentHitPoint", t.max) end
+            if t.fi >= FLINCH_FRAMES then t.index = t.index + 1 end
+        end
+        -- RE4 may apply the hit's damage a few frames later: keep the enemy alive until the end, and note it
+        local now = try_call(hp, "get_CurrentHitPoint")
+        if t.max ~= nil and now ~= nil and now < t.max then
+            local by = cur or t.per[t.index - 1]   -- (while waiting before a hit: the hit before)
+            if by ~= nil then by.hp_taken = math.max(by.hp_taken or 0, t.max - now) end
+            try_call(hp, "set_CurrentHitPoint", t.max)
         end
     end
 end
@@ -1052,7 +1168,7 @@ local function leon_and_forward()
     return me, fx, fz
 end
 
-local function spawn_test(kind)
+spawn_test = function(kind)
     local r = { test = kind }
     if kind == "remove_spawned" then
         for _, go in ipairs(spawned) do pcall(function() go:call("destroy(via.GameObject)", go) end) end
@@ -1090,7 +1206,8 @@ local function spawn_test(kind)
             r.result = "no enemy model to copy (stand near an enemy)"
         else
             local go, err = spawn_game_object("MinecraftTestStatue")
-            local comp, cerr = go and add_component(go, "via.render.Mesh")
+            local comp, cerr = nil, nil
+            if go ~= nil then comp, cerr = add_component(go, "via.render.Mesh") end
             if comp == nil then
                 r.result = err or cerr
             else
@@ -1132,7 +1249,9 @@ local function camera_components()
                     local okp, np = pcall(function() return m:get_num_params() end)
                     if okp and np == 0 then
                         local okv, v = pcall(function() return comp:call(n) end)
-                        entry.values[n] = okv and value_of(v, 1) or "?"
+                        local value = "?"
+                        if okv then value = value_of(v, 1) end   -- (okv and ... or "?") turns false into "?"
+                        entry.values[n] = value
                     end
                 end
             end
@@ -1160,6 +1279,9 @@ local KEYWORD_TYPES = {
     ["chainsaw.Ch1c0BodyHitDriverCommon"] = { "damage", "wince", "react", "hit", "request", "stagger", "down", "knock", "flinch" },
     ["chainsaw.CharacterBodyHitDriver"] = { "damage", "wince", "react", "hit", "request", "stagger", "down", "knock", "flinch" },
     ["via.render.Mesh"] = { "draw", "shadow", "static", "dynamic", "mesh", "material", "enable", "raytrac", "cull" },
+    ["chainsaw.HitController"] = { "damage", "hit", "pool", "callback", "wince", "react", "request", "attack" },
+    ["chainsaw.EnemyBaseContext"] = { "damage", "wince", "react", "hit", "stagger", "knock", "down", "stun", "attack" },
+    ["chainsaw.collision.AttackUserData"] = { "attack", "damage", "wince", "break", "stopping", "data" },
     ["via.physics.Colliders"] = { "collider", "userdata", "num" },
     ["via.physics.Collider"] = { "userdata", "shape", "enable" },
 }
@@ -1241,7 +1363,7 @@ write_report = function()
         camera = camera_info(),
         damage_tests = test_results,
         live_tests = live_results,
-        real_hits = { calls = hook_counts, first_call_arguments = hook_args, captured_hits = captures,
+        real_hits = { calls = hook_counts, first_call_arguments = hook_args, order = hook_sequence, captured_hits = captures,
             nearest_enemy_motion = motion_log, reactions_after_real_hits = reaction_log,
             real_hit_seen = type(MinecraftRE4Hit) == "table" and MinecraftRE4Hit.template ~= nil },
         enemy_states_seen = states_seen,
@@ -1274,10 +1396,11 @@ re.on_draw_ui(function()
 
     imgui.text("Record real hits (to make enemies flinch at Minecraft hits):")
     imgui.text("  1. Start   2. F7 (RE4 plays)   3. knife an enemy (and shoot one)   4. F7 again   5. Stop")
+    imgui.text("  (if RE4 feels slower afterwards: ScriptRunner -> Reset scripts)")
     if not recording then
         if imgui.button("Start recording") then
             hook_all()
-            hook_counts, hook_args, captures, motion_log = {}, {}, {}, {}
+            hook_counts, hook_args, captures, motion_log, hook_sequence = {}, {}, {}, {}, {}
             recording = true
             log("recording real hits...")
         end

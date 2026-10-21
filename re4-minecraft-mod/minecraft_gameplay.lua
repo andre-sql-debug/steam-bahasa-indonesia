@@ -642,7 +642,12 @@ local function apply_re4_damage(hp, amount)
     -- 1. the game's own subtraction, when this build has it
     local used = "set"
     if api.add_damage then
-        if pcall(function() api.add_damage:call(hp, dmg) end) then
+        -- (marked as ours, so minecraft_diagnostics.lua doesn't take it for one of RE4's own hits)
+        local H = MinecraftRE4Hit
+        if type(H) == "table" then H.applying = true end
+        local added = pcall(function() api.add_damage:call(hp, dmg) end)
+        if type(H) == "table" then H.applying = false end
+        if added then
             local after = try_call(hp, "get_CurrentHitPoint")
             if after ~= nil and after < before then used = "addDamage" end
         end
@@ -798,9 +803,12 @@ local FLINCH_FILE = "minecraft_flinch.json"
 local FLINCH_COOLDOWN_FRAMES = 30     -- one reaction per enemy at most every half second
 local FLINCH_WINCE, FLINCH_STOPPING = 100.0, 100.0   -- used when no real hit was seen to copy from
 
+local FLINCH_METHODS = { template = true, last_attack = true, fresh = true }
+
 local HIT = {
     method = nil,            -- the way that works on this PC (from the Flinch test), or nil (not tested)
-    template = nil,          -- copy of RE4's last real hit on an enemy
+    methods = nil,           -- every way that worked in the test, best first (tried in order)
+    template = nil,          -- copy of Leon's first real hit on an enemy this session
     building = false,        -- our own callbackDamageHit is running (not a real hit)
     failures = 0,
     last_flinch = {},        -- enemy body address -> frame
@@ -811,9 +819,13 @@ MinecraftRE4Hit = HIT        -- shared with minecraft_diagnostics.lua
 
 do
     local ok, saved = pcall(json.load_file, FLINCH_FILE)
-    if ok and type(saved) == "table" and saved.works == true and type(saved.method) == "string" then
+    if ok and type(saved) == "table" and saved.works == true and FLINCH_METHODS[saved.method] then
         HIT.method = saved.method
-        HIT.status = "on (" .. saved.method .. ", tested " .. tostring(saved.time or "?") .. ")"
+        HIT.methods = {}
+        for _, m in ipairs(type(saved.methods) == "table" and saved.methods or { saved.method }) do
+            if FLINCH_METHODS[m] then HIT.methods[#HIT.methods + 1] = m end
+        end
+        HIT.status = "on (" .. table.concat(HIT.methods, ", ") .. "; tested " .. tostring(saved.time or "?") .. ")"
     end
 end
 
@@ -839,19 +851,24 @@ local function enemy_bodies()
     return out
 end
 
--- RE4's own hits on enemies: keep a copy of the last one (its numbers and attack data are the model for ours)
+-- Leon's own hits on enemies: keep a copy of the first one (its numbers and attack data are the model for
+-- ours). Hits from other enemies (dynamite) are not Leon's and are left out.
 pcall(function()
     local td = sdk.find_type_definition("chainsaw.HitController")
     local m = td and td:get_method("callbackDamageHit(chainsaw.HitController.DamageInfo)")
     if m == nil then return end
     sdk.hook(m, function(args)
-        if HIT.building then return end
+        if HIT.building or HIT.template ~= nil then return end
         pcall(function()
             local hc = sdk.to_managed_object(args[2])
             local info = sdk.to_managed_object(args[3])
             local go = hc and try_call(hc, "get_GameObject")
             local a = go and address_of(go)
-            if a == nil or info == nil or enemy_bodies()[a] == nil then return end
+            if a == nil or info == nil then return end
+            local bodies = enemy_bodies()
+            if bodies[a] == nil then return end
+            local owner = address_of(try_call(info, "get_AttackOwnerObject"))
+            if owner ~= nil and bodies[owner] ~= nil then return end
             local copy = info:call("MemberwiseClone")
             if copy ~= nil then
                 pcall(function() copy:add_ref() end)
@@ -868,9 +885,8 @@ local function new_damage_info()
     local info = HIT.pool[slot]
     if info == nil then
         info = sdk.create_instance("chainsaw.HitController.DamageInfo")
-        if info == nil then return nil end
+        if info == nil or not pcall(function() info:call(".ctor") end) then return nil end
         pcall(function() info:add_ref() end)
-        info:call(".ctor")
         HIT.pool[slot] = info
     else
         try_call(info, "clear")
@@ -902,10 +918,12 @@ local function set(obj, method, value)
     return pcall(function() obj:call(method, value) end)
 end
 
--- Make this enemy react to a hit coming from from_pos, the way `method` fills the hit. Returns ok, message.
-function HIT.flinch(enemy, method, from_pos)
+-- Make this enemy react to a hit coming from from_pos, the way `method` fills the hit. strength (optional):
+-- how heavy the hit is, as a share of the enemy's Minecraft health (0.3 = a normal sword hit on a zombie).
+-- Returns ok, message, unavailable (true when this way can't be used here yet and nothing was sent).
+function HIT.flinch(enemy, method, from_pos, strength)
     method = method or HIT.method
-    if method == nil then return false, "no working method known" end
+    if method == nil then return false, "no working method known", true end
     local body = try_call(enemy, "get_BodyGameObject")
     local hc = body and try_call(body, "getComponent(System.Type)", hit_controller_type)
     local tr = body and try_call(body, "get_Transform")
@@ -922,20 +940,26 @@ function HIT.flinch(enemy, method, from_pos)
     local attack, wince, stopping, brk = nil, FLINCH_WINCE, FLINCH_STOPPING, 0.0
     if method == "template" then
         local t = HIT.template
-        if t == nil then return false, "no real hit seen yet to copy" end
+        if t == nil then return false, "no real hit seen yet to copy", true end
         attack = try_call(t, "get_AttackData")
         wince = try_call(t, "get_Wince") or wince
         stopping = try_call(t, "get_Stopping") or stopping
         brk = try_call(t, "get_Break") or brk
     elseif method == "last_attack" then
         attack = try_call(enemy, "get_LastAttackData")
-        if attack == nil then return false, "this enemy has no last attack data" end
+        if attack == nil then return false, "this enemy has no last attack data", true end
     else
         attack = sdk.create_instance("chainsaw.collision.AttackHitUserData.AttackData")
         if attack ~= nil then
             pcall(function() attack:add_ref() end)
             try_call(attack, ".ctor")
         end
+    end
+
+    -- Light hits barely interrupt, heavy ones stagger (like Skyrim): scale RE4's reaction numbers
+    if strength ~= nil then
+        local k = math.min(2.0, math.max(0.5, strength / 0.3))
+        wince, stopping = wince * k, stopping * k
     end
 
     local info = new_damage_info()
@@ -964,9 +988,14 @@ function HIT.flinch(enemy, method, from_pos)
     return true, "ok"
 end
 
--- After a Minecraft hit landed on this enemy (HitPoint hp): its reaction, if a working way is known
-local function flinch_after_hit(hp, from_pos)
+-- After a Minecraft hit landed on this enemy (HitPoint hp): its reaction, if a working way is known.
+-- Not while RE4 runs a scene (cutscene, grab, talk) or the enemy can't be hurt right now, like RE4's own hits.
+local function flinch_after_hit(hp, from_pos, strength)
     if not settings.flinch or HIT.method == nil or hp == nil or not enemy_alive(hp) then return end
+    local control = MinecraftRE4Control
+    if type(control) == "table" and control.mode == "re4" and control.reason ~= "F7" then return end
+    if hp_flag(hp, "get_Invincible") or hp_flag(hp, "get_NoDamage") then return end
+    if (try_call(hp, "get_CurrentHitPoint") or 1) <= 0 then return end
     local cm = get_character_manager()
     local list = cm and try_call(cm, "get_EnemyContextList")
     local count = list and try_call(list, "get_Count") or 0
@@ -979,9 +1008,19 @@ local function flinch_after_hit(hp, from_pos)
             local key = body and address_of(body)
             if key ~= nil and state.frame - (HIT.last_flinch[key] or -1000) >= FLINCH_COOLDOWN_FRAMES then
                 HIT.last_flinch[key] = state.frame
-                local ok, msg = HIT.flinch(enemy, HIT.method, from_pos)
+                -- The ways that worked in the test, best first; one that can't be used yet (no real hit seen
+                -- this session, no last attack on this enemy) is skipped and isn't a failure
+                local ok, msg, unavailable
+                for _, m in ipairs(HIT.methods or { HIT.method }) do
+                    local okc
+                    okc, ok, msg, unavailable = pcall(HIT.flinch, enemy, m, from_pos, strength)
+                    if not okc then ok, msg, unavailable = false, ok, false end
+                    if not unavailable then break end
+                end
                 if ok then
                     HIT.failures = 0
+                elseif unavailable then
+                    HIT.last_flinch[key] = nil
                 else
                     HIT.failures = HIT.failures + 1
                     if HIT.failures >= 3 then
@@ -1002,7 +1041,7 @@ local function damage_enemy(hp, damage, note, from_pos)
     local health = mob_health(max)
     local result = apply_re4_damage(hp, max * damage / health)
     debug.combat = string.format("hit for %.1f%s: %s (as a %d-health mob)", damage, note, result, math.floor(health))
-    local ok, err = pcall(flinch_after_hit, hp, from_pos)
+    local ok, err = pcall(flinch_after_hit, hp, from_pos, damage / health)
     if not ok then HIT.status = "error: " .. tostring(err) end
 end
 

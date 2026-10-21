@@ -297,7 +297,8 @@ public final class Re4Terrain {
                 AABB wall = new AABB(xw - WALL_THICKNESS, anchorY + Math.min(h, hn), z0,
                         xw + WALL_THICKNESS, anchorY + Math.max(h, hn) + WALL_HEIGHT, z0 + cell);
                 add(buckets, wall);
-                occluders.add(wall.setMaxY(anchorY + Math.max(h, hn) + WALL_OCCLUDE_HEIGHT[Math.min(2, (flags >> 2) & 3)]));
+                // The wall's height was measured from this cell's floor (a crate or ledge hides up to its top only)
+                occluders.add(wall.setMaxY(anchorY + Math.max(Math.max(h, hn), h + WALL_OCCLUDE_HEIGHT[Math.min(2, (flags >> 2) & 3)])));
                 count++;
             }
             if ((flags & 2) != 0) {
@@ -306,7 +307,7 @@ public final class Re4Terrain {
                 AABB wall = new AABB(x0, anchorY + Math.min(h, hn), zw - WALL_THICKNESS,
                         x0 + cell, anchorY + Math.max(h, hn) + WALL_HEIGHT, zw + WALL_THICKNESS);
                 add(buckets, wall);
-                occluders.add(wall.setMaxY(anchorY + Math.max(h, hn) + WALL_OCCLUDE_HEIGHT[Math.min(2, (flags >> 4) & 3)]));
+                occluders.add(wall.setMaxY(anchorY + Math.max(Math.max(h, hn), h + WALL_OCCLUDE_HEIGHT[Math.min(2, (flags >> 4) & 3)])));
                 count++;
             }
         }
