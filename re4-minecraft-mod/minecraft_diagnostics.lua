@@ -1042,7 +1042,7 @@ re.on_pre_application_entry("UpdateBehavior", function()
     if pending_test ~= nil then
         local k = pending_test
         pending_test = nil
-        if k == "spawn_cube" or k == "spawn_statue" or k == "remove_spawned" then
+        if k == "spawn_cube" or k == "spawn_statue" or k == "spawn_light" or k == "remove_spawned" then
             local ok, e = pcall(spawn_test, k)
             if not ok then log("spawn test error: " .. tostring(e)) end
         elseif k == "look" or k == "walk" or k == "flinch" then
@@ -1218,6 +1218,41 @@ spawn_test = function(kind)
                 r.result = "a copy of the enemy's model should stand ahead and to the side of Leon (possibly in a T pose)"
             end
         end
+    elseif kind == "spawn_light" then
+        -- an RE4 point light (what a Minecraft torch would become): warm, 1.5 m up, 2 m in front of Leon
+        local go, err = spawn_game_object("MinecraftTestLight")
+        if go == nil then
+            r.result = err
+        else
+            local light, lerr = add_component(go, "via.render.PointLight")
+            r.light = light and "created" or lerr
+            if light ~= nil then
+                r.setters = {}
+                local function try_set(name, value)
+                    local ok = pcall(function() light:call(name, value) end)
+                    r.setters[name] = ok and "ok" or "failed"
+                end
+                try_set("set_Enabled", true)
+                try_set("set_Color", Vector3f.new(1.0, 0.75, 0.45))
+                try_set("set_Intensity", 800.0)
+                try_set("set_AttenuationRange", 6.0)
+                try_set("set_Radius", 0.1)
+                try_set("set_ShadowCastFlag", true)
+                try_set("set_ShadowEnable", true)
+                try_set("set_BlackBodyRadiation", false)
+                try_set("set_UsingSameIntensity", false)
+                r.values = {}
+                for _, n in ipairs({ "get_Enabled", "get_Color", "get_Intensity", "get_AttenuationRange", "get_Radius" }) do
+                    local okv, v = pcall(function() return light:call(n) end)
+                    local value = "?"
+                    if okv then value = value_of(v, 1) end
+                    r.values[n] = value
+                end
+            end
+            r.place = place(go, Vector3f.new(me.x + fx * 2.0, me.y + 1.5, me.z + fz * 2.0), nil)
+            r.result = light and "a warm light should glow 2 m in front of Leon: does it light the ground and walls?"
+                or "could not add the light"
+        end
     end
     spawn_results[#spawn_results + 1] = r
     log(kind .. ": " .. tostring(r.result))
@@ -1328,7 +1363,7 @@ end
 -- Every member of the types a hit and a reaction are made of (for building them for Minecraft hits)
 ------------------------------------------------------------------------------
 
-local FULL_TYPES = { "via.render.Primitive", "chainsaw.HitController.DamageInfo", "chainsaw.HitController.DamageValue",
+local FULL_TYPES = { "via.render.Primitive", "via.render.PointLight", "chainsaw.HitController.DamageInfo", "chainsaw.HitController.DamageValue",
     "chainsaw.HitController.CalculateInfo", "chainsaw.collision.AttackHitUserData.AttackData",
     "chainsaw.collision.HitInfo", "chainsaw.LookAtRequest", "via.motion.TreeLayer" }
 local KEYWORD_TYPES = {
@@ -1506,6 +1541,8 @@ local function draw_ui()
     if imgui.button("Spawn test cube") then pending_test = "spawn_cube" end
     imgui.same_line()
     if imgui.button("Spawn enemy-model copy") then pending_test = "spawn_statue" end
+    imgui.same_line()
+    if imgui.button("Spawn test light") then pending_test = "spawn_light" end
     imgui.same_line()
     if imgui.button("Remove test objects") then pending_test = "remove_spawned" end
 
