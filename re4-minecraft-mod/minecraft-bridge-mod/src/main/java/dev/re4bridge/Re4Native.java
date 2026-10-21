@@ -144,7 +144,8 @@ public final class Re4Native {
             }
             enabled = status.has("enabled") && status.get("enabled").getAsBoolean();
             Set<Integer> ids = new HashSet<>();
-            boolean ours = status.has("session") && status.get("session").getAsLong() == SESSION;
+            boolean ours = status.has("session") && status.get("session").isJsonPrimitive()
+                    && status.get("session").getAsLong() == SESSION;
             if (ours && status.has("acked") && status.get("acked").isJsonArray()) {
                 for (JsonElement e : status.getAsJsonArray("acked")) {
                     ids.add(e.getAsInt());

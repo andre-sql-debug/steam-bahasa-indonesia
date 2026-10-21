@@ -1,0 +1,200 @@
+"""Scenarios run against the real Minecraft client with a fake RE4 (fake_re4.FakeRE4). Each returns
+{"name", "passed" (True/False, or None when skipped), "details"}."""
+import math
+import re
+import time
+
+
+def result(name, passed, **details):
+    return {"name": name, "passed": passed, "details": details}
+
+
+def run_commands(re4, cmds):
+    for c in cmds:
+        done = re4.command(c)
+        while time.time() < done:
+            re4.step()
+
+
+def ensure_alive(re4):
+    if re4.bridge().get("dead"):
+        done = re4.respawn()
+        while time.time() < done:
+            re4.step()
+        re4.run_for(2.0)
+
+
+def chat_value(lines, pattern):
+    for line in reversed(lines):
+        m = re.search(pattern, line)
+        if m:
+            return m
+    return None
+
+
+def gold_pixels(picture):
+    data, w, h = picture
+    xs, ys = [], []
+    for y in range(0, h - 60, 2):
+        row = y * w * 4
+        for x in range(0, w, 2):
+            r, g, b, a = data[row + x * 4: row + x * 4 + 4]
+            if a > 200 and r > 110 and r > 1.5 * b and g > 1.2 * b and abs(r - g) < 90:
+                xs.append(x)
+                ys.append(y)
+    return xs, ys
+
+
+def opaque_pixels(picture, box):
+    data, w, h = picture
+    x0, y0, x1, y1 = box
+    n = 0
+    for y in range(max(0, y0), min(h, y1), 2):
+        row = y * w * 4
+        for x in range(max(0, x0), min(w, x1), 2):
+            if data[row + x * 4 + 3] > 200:
+                n += 1
+    return n
+
+
+# ---------------------------------------------------------------------------
+
+def lockstep_camera(re4, mc):
+    """Minecraft draws from RE4's camera: a block lands where RE4's camera projection says it should."""
+    ensure_alive(re4)
+    mc.mark()
+    re4.yaw, re4.pitch = 0.0, 0.0
+    run_commands(re4, ["/setblock ~2 ~ ~4 air", "/setblock ~2 ~ ~4 gold_block"])
+    re4.matched = re4.tested = 0
+    re4.run_for(2.0)
+    m = chat_value(mc.chat_since(), r"Changed the block at (-?\d+), (-?\d+), (-?\d+)")
+    pic = re4.overlay_picture()
+    if m is None or pic is None:
+        return result("lockstep_camera", False, problem="block not placed or no picture", chat=mc.chat_since()[-3:])
+    bx, by, bz = (int(v) for v in m.groups())
+    pos = re4.bridge().get("pos") or {}
+    cam = (pos.get("x", 0), pos.get("y", 0) + 1.62, pos.get("z", 0))
+    _, w, h = pic
+    cx, cy, cz = bx + 0.5 - cam[0], by + 0.5 - cam[1], bz - cam[2]
+    tan_v = math.tan(math.radians(re4.fov / 2))
+    tan_h = tan_v * w / h
+    sx = (1 + (-cx) / (cz * tan_h)) / 2 * w
+    sy = (1 - cy / (cz * tan_v)) / 2 * h
+    xs, ys = gold_pixels(pic)
+    if not xs:
+        return result("lockstep_camera", False, problem="block not visible", predicted=(round(sx), round(sy)))
+    inside = min(xs) - 6 <= sx <= max(xs) + 6 and min(ys) - 6 <= sy <= max(ys) + 6
+    rate = re4.matched / max(1, re4.tested)
+    run_commands(re4, ["/setblock ~2 ~ ~4 air"])
+    return result("lockstep_camera", inside and rate >= 0.5, predicted=(round(sx), round(sy)),
+                  block_box=(min(xs), min(ys), max(xs), max(ys)), lockstep_match_rate=round(rate, 2))
+
+
+def golem_fight(re4, mc):
+    """An iron golem fights the RE4 enemy's stand-in: RE4 gets the damage and the fight, the golem gets hit back."""
+    ensure_alive(re4)
+    run_commands(re4, ["/gamemode creative", "/kill @e[type=iron_golem]", "/summon iron_golem ~4 ~ ~-1"])
+    before = (re4.bridge().get("enemy_damage") or {}).get("123456789", 0.0)
+    engaged_seen = [False]
+
+    def watch(r):
+        if "123456789," in (r.bridge().get("engaged") or ""):
+            engaged_seen[0] = True
+    re4.run_for(14.0, every=watch)
+    after = (re4.bridge().get("enemy_damage") or {}).get("123456789", 0.0)
+    mc.mark()
+    run_commands(re4, ["/data get entity @e[type=iron_golem,sort=nearest,limit=1] Health"])
+    re4.run_for(1.0)
+    m = chat_value(mc.chat_since(), r"has the following entity data: ([\d.]+)f")
+    health = float(m.group(1)) if m else None
+    run_commands(re4, ["/kill @e[type=iron_golem]"])
+    ok = after > before and engaged_seen[0] and health is not None and health < 100.0
+    return result("golem_fight", ok, damage_to_enemy=round(after - before, 1), fight_sent_to_re4=engaged_seen[0],
+                  golem_health_after=health)
+
+
+def native_handoff(re4, mc):
+    """Real RE4 mobs: Minecraft exports the golem's parts, sends their poses, and stops drawing what RE4 shows."""
+    ensure_alive(re4)
+    mc.mark()
+    run_commands(re4, ["/kill @e[type=iron_golem]", "/summon iron_golem ~0.5 ~ ~3 {NoAI:1b}"])
+    re4.native_status = {"enabled": True, "acked": [], "session": None}
+    re4.run_for(8.0)
+    assets = re4.read_json("minecraft_native_assets.json")
+    if not assets or not assets.get("exports"):
+        log = mc.log_since()
+        guarded = "not built yet" in log or "could not write the RE4 model" in log
+        re4.native_status = {"enabled": False, "acked": [], "session": None}
+        re4.run_for(1.0)
+        run_commands(re4, ["/kill @e[type=iron_golem]"])
+        return result("native_handoff", None if guarded else False,
+                      problem="RE4 file writers not in yet (export refused)" if guarded else "no exports")
+    pic_before = re4.overlay_picture()
+    poses = re4.read_json("minecraft_native_poses.json") or {}
+    parts = [p for p in (poses.get("parts") or "").split(";") if p]
+    re4.native_status = {"enabled": True, "acked": [int(k) for k in assets["exports"]], "session": assets.get("session")}
+    re4.run_for(3.0)
+    pic_after = re4.overlay_picture()
+    w, h = pic_before[1], pic_before[2]
+    box = (w // 4, 0, 3 * w // 4, h - 100)
+    before_px, after_px = opaque_pixels(pic_before, box), opaque_pixels(pic_after, box)
+    re4.native_status = {"enabled": False, "acked": [], "session": None}
+    re4.run_for(1.0)
+    run_commands(re4, ["/kill @e[type=iron_golem]"])
+    ok = len(assets["exports"]) >= 6 and len(parts) >= 6 and after_px < 0.25 * max(1, before_px)
+    return result("native_handoff", ok, exports=len(assets["exports"]), parts_in_poses=len(parts),
+                  overlay_pixels_before=before_px, overlay_pixels_after=after_px)
+
+
+def leon_damage(re4, mc):
+    """RE4's hits on Leon cost Minecraft hearts; RE4 killing Leon kills Minecraft's player."""
+    ensure_alive(re4)
+    run_commands(re4, ["/gamemode survival", "/effect clear @s"])
+    re4.input.update({"leon_damage": 0, "leon_max": 1000, "leon_dead": False})
+    re4.run_for(2.0)
+    start_health = re4.bridge().get("health")
+    re4.input["leon_damage"] = 250
+    lowest = [start_health]
+
+    def watch(r):
+        hh = r.bridge().get("health")
+        if hh is not None:
+            lowest[0] = min(lowest[0], hh)
+    re4.run_for(0.8, every=watch)
+    re4.input["leon_dead"] = True
+    died = [False]
+
+    def watch_dead(r):
+        if r.bridge().get("dead"):
+            died[0] = True
+    re4.run_for(2.0, every=watch_dead)
+    re4.input.update({"leon_damage": 250, "leon_dead": False})
+    ensure_alive(re4)
+    run_commands(re4, ["/gamemode creative"])
+    for k in ("leon_damage", "leon_max", "leon_dead"):
+        re4.input.pop(k, None)
+    ok = start_health is not None and lowest[0] is not None and lowest[0] <= start_health - 4.0 and died[0]
+    return result("leon_damage", ok, health_before=start_health, lowest_after_hit=lowest[0], died_with_leon=died[0])
+
+
+def re4_stopped(re4, mc):
+    """RE4 stops sending: the player is held at the meeting point, then moved safely to the world spawn."""
+    ensure_alive(re4)
+    run_commands(re4, ["/gamemode survival"])
+    re4.run_for(3.0)
+    y_before = (re4.bridge().get("pos") or {}).get("y")
+    mc.mark()
+    re4.send_input = False
+    re4.run_for(13.0)
+    log = mc.log_since()
+    moved = "moved the player from the RE4 meeting point" in log
+    dead = "fell from a high place" in log or "hit the ground too hard" in log
+    re4.send_input = True
+    re4.run_for(8.0)
+    y_after = (re4.bridge().get("pos") or {}).get("y")
+    run_commands(re4, ["/gamemode creative"])
+    ok = moved and not dead and y_after is not None and abs(y_after - 250.0) < 70.0
+    return result("re4_stopped", ok, y_before=y_before, moved_to_spawn=moved, died=dead, y_after_reconnect=y_after)
+
+
+ALL = [lockstep_camera, golem_fight, native_handoff, leon_damage, re4_stopped]

@@ -129,7 +129,7 @@ public final class ReMdfWriter {
          * @param baseDielectricPath colour texture, e.g. {@code minecraft/zombie/zombie.tex}
          */
         public Material(String name, String baseDielectricPath) {
-            checkText("material name", name);
+            ReMeshWriter.checkName(name);
             this.name = name;
             for (String[] t : ENV_DEFAULT_TEXTURES) {
                 textures.put(t[0], t[1]);

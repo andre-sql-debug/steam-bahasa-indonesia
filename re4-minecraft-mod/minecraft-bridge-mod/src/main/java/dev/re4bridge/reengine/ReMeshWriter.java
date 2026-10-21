@@ -37,9 +37,9 @@ import java.util.Objects;
  * (non-skinned) mesh: one LOD, one mesh group, one sub-mesh, one material referenced by name. The material name
  * must equal the material name inside the {@code .mdf2} that the game pairs with the mesh.
  *
- * <p>Conventions (same as RE Engine and as Minecraft's own model space after its Y flip): right-handed, Y up,
- * metres, counter-clockwise triangles are front faces. UVs use the image convention: (0,0) is the top-left
- * pixel corner, v grows downwards (no flip needed for Minecraft UVs).
+ * <p>Conventions (RE Engine's, as RE-Mesh-Editor and REE-Lib import them unchanged): right-handed, Y up, metres,
+ * counter-clockwise triangles are front faces. UVs use the image convention: (0,0) is the top-left pixel corner,
+ * v grows downwards, which is also how Minecraft's texture coordinates run.
  *
  * <p>Vertex layout written (three streams, like the RE4 exporters): Position float3 (12 bytes), packed
  * normal+tangent (8 bytes: 4 signed bytes normal xyz + 0, 4 signed bytes tangent xyz + bitangent sign) and
@@ -152,6 +152,11 @@ public final class ReMeshWriter {
         checkFinite("positions", positions);
         checkFinite("normals", normals);
         checkFinite("uvs", uvs);
+        for (float f : uvs) {
+            if (Math.abs(f) > 65504.0F) {
+                throw new IllegalArgumentException("UV " + f + " does not fit a half float");
+            }
+        }
 
         boolean intFaces = n >= 0xFFFF;
         // A 16-bit index list with an odd index count needs 2 padding bytes, and the exporters disagree on
@@ -503,7 +508,8 @@ public final class ReMeshWriter {
         return out;
     }
 
-    private static void checkName(String name) {
+    /** Material names: 1..255 printable ASCII characters without spaces (shared with {@link ReMdfWriter}). */
+    static void checkName(String name) {
         Objects.requireNonNull(name, "materialName");
         if (name.isEmpty() || name.length() > 255) {
             throw new IllegalArgumentException("material name must be 1..255 characters");
