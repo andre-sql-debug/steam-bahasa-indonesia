@@ -67,7 +67,12 @@ local function make_go(name)
 end
 CREATE_TRIES = 0
 local create = { call = function(self, _, name) CREATE_TRIES = CREATE_TRIES + 1; return make_go(name) end }
-local scene = obj({ ["findGameObject(System.String)"] = function(name) FINDS[#FINDS + 1] = name; return nil end })
+-- (finds the objects made that RE4 still has, like objects kept through a loading screen)
+local scene = obj({ ["findGameObject(System.String)"] = function(name)
+    FINDS[#FINDS + 1] = name
+    for _, o in ipairs(OBJECTS) do if o.name == name and not o.destroyed then return o end end
+    return nil
+end })
 LIGHT_TYPE = LIGHT_TYPE == nil and true or LIGHT_TYPE
 sdk = { get_managed_singleton = function() SDK_CALLS = SDK_CALLS + 1; return cm end,
     game_namespace = function(n) return "chainsaw." .. n end,
@@ -126,18 +131,33 @@ class Env:
     def objects(self):
         return [self.G.OBJECTS[i] for i in range(1, len(self.G.OBJECTS) + 1)]
 
-    def lit(self):
-        """The light objects switched on: (x, y, z) -> their light's values."""
-        out = {}
+    def lit_objects(self):
+        """The light objects switched on (two on one spot count twice)."""
+        out = []
         for o in self.objects():
             if o.destroyed or not o.draw or o.light is None:
                 continue
             v = o.light["values"]
             if v["set_Enabled"] is False or v["set_Intensity"] == 0:
                 continue
-            p = o.tr.pos
-            out[(round(p.x, 3), round(p.y, 3), round(p.z, 3))] = v
+            out.append(o)
         return out
+
+    def lit(self):
+        """The light objects switched on: (x, y, z) -> their light's values."""
+        out = {}
+        for o in self.lit_objects():
+            p = o.tr.pos
+            out[(round(p.x, 3), round(p.y, 3), round(p.z, 3))] = o.light["values"]
+        return out
+
+    def most_lit(self, n):
+        """n RE4 frames without Minecraft writing anything: the most light objects switched on in any of them."""
+        most = 0
+        for _ in range(n):
+            self.G.frames(1)
+            most = max(most, len(self.lit_objects()))
+        return most
 
 
 def light(x, y, z, level=15, rgb="FF9A3C", inside=0):
@@ -266,7 +286,10 @@ created = e.G.CREATED
 e.frames(6, A + B + C)
 finds = sorted(e.G.FINDS.values())
 check("Leon back: our lights from before looked up by name", finds == live_names, (finds, live_names))
-check("Leon back: new light objects made", e.G.CREATED == created + 3 and len(e.lit()) == 3, (e.G.CREATED - created, len(e.lit())))
+check("Leon back: our lights from before destroyed", all(e.G.DESTROYED_NAMES[n] for n in live_names),
+      [n for n in live_names if not e.G.DESTROYED_NAMES[n]])
+check("Leon back: new light objects made", e.G.CREATED == created + 3 and len(e.lit_objects()) == 3,
+      (e.G.CREATED - created, len(e.lit_objects())))
 
 # ---- switched off: every light object destroyed, then nothing more
 
@@ -326,6 +349,28 @@ e.frames(400, A + B + C)
 check("no PointLight type: nothing made, reported", e.G.CREATED == 0 and len(e.M.debug.errors) >= 1
       and "could not be made" in e.M.debug.status, (e.G.CREATED, e.M.debug.status))
 check("no PointLight type: tried again only every few seconds", len(e.M.debug.errors) <= 2, list(e.M.debug.errors.values()))
+
+# ---- a bridge file left from a Minecraft that is gone (closed or crashed in a world): its lights never come on
+e = Env()
+e.bridge(A + B + C)
+e.M.settings.enabled = True
+most = e.most_lit(120)
+check("leftover file when RE4 starts: no lights, no objects", most == 0 and e.G.CREATED == 0
+      and e.M.debug.status == "waiting for Minecraft", (most, e.G.CREATED, e.M.debug.status))
+e.frames(10, A + B + C)
+check("leftover file: lights on once Minecraft writes", len(e.lit_objects()) == 3, len(e.lit_objects()))
+# switched off, Minecraft writes once more and closes, switched on again: the old file still isn't lit
+e.M.settings.enabled = False
+e.frames(10)
+e.bridge(A + B)
+e.frames(3)
+e.M.settings.enabled = True
+created = e.G.CREATED
+most = e.most_lit(120)
+check("leftover file when switched on again: no lights, no objects", most == 0 and e.G.CREATED == created,
+      (most, e.G.CREATED - created))
+e.frames(10, A + B)
+check("switched on again: lights on once Minecraft writes", len(e.lit_objects()) == 2, len(e.lit_objects()))
 
 print("FAILS", fails)
 sys.exit(1 if fails else 0)

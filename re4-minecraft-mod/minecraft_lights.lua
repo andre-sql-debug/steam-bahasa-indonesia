@@ -222,7 +222,11 @@ end
 local function read_bridge()
     local ok, data = pcall(json.load_file, BRIDGE_FILE)
     if not ok or type(data) ~= "table" or data.seq == nil or data.seq == state.bridge_seq then return end
+    -- a file seen for the first time may be left from a Minecraft that is gone (closed or crashed in a world):
+    -- it only counts once its seq changes while we watch
+    local first = state.bridge_seq == nil
     state.bridge_seq = data.seq
+    if first then return end
     state.bridge_frame = state.frame
     local text = (data.in_world == true and type(data.lights) == "string") and data.lights or ""
     if text ~= state.text then
@@ -318,6 +322,8 @@ local was_present = false
 
 re.on_application_entry("LateUpdateBehavior", function()
     state.frame = state.frame + 1
+    -- (switched on again later: nothing is lit until Minecraft writes anew, as it may have closed meanwhile)
+    if not settings.enabled then state.bridge_seq, state.bridge_frame = nil, -100000 end
     -- off, and nothing of ours left anywhere: nothing to do
     if not settings.enabled and #state.objects == 0 and next(made_names) == nil then
         debug.status = "off"

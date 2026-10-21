@@ -469,7 +469,24 @@ LIGHT_BLOCKS = [("torch", 14, "warm", 0, (2, 0, 3)), ("soul_torch", 10, "cyan", 
                 ("redstone_torch", 7, "red", 0, (0, 0, 5)), ("glowstone", 15, "pale", 1, (3, 1, -3)),
                 ("sea_lantern", 15, "cool", 1, (-3, 1, -3)), ("lantern", 15, "warm", 0, (4, 0, 0)),
                 ("furnace[lit=true]", 13, "warm_white", 1, (-4, 0, 0)), ("candle[lit=true,candles=2]", 6, "warm_white", 0, (0, 0, -4)),
-                ("furnace[lit=false]", 0, None, 0, (0, 1, -6))]
+                ("furnace[lit=false]", 0, None, 0, (0, 1, -6)), ("wall_torch[facing=north]", 14, "warm", 0, (5, 0, 3)),
+                ("redstone_wall_torch[facing=west]", 7, "red", 0, (-5, 0, 2)),
+                ("deepslate_redstone_ore[lit=true]", 9, "red", 1, (2, 0, -5))]
+FACING_STEP = {"north": (0, -1), "south": (0, 1), "west": (-1, 0), "east": (1, 0)}   # (x, z)
+
+
+def wall_of(name):
+    """A wall torch's facing step (x, z): its wall is the other way. None for other blocks."""
+    m = re.search(r"wall_torch\[facing=(\w+)\]", name)
+    return FACING_STEP[m.group(1)] if m else None
+
+
+def light_spot(name):
+    """Where in its block a light block's light is: a torch's flame (on a wall: 0.27 toward the wall, 0.92 high)."""
+    step = wall_of(name)
+    if step is not None:
+        return (0.5 - 0.27 * step[0], 0.92, 0.5 - 0.27 * step[1])
+    return (0.5, 0.7 if "torch" in name else 0.5, 0.5)
 
 
 def colour_ok(kind, hex_rgb):
@@ -512,6 +529,11 @@ def minecraft_lights(re4, mc):
     light's spot, light level, a colour per kind, whether a full block is around it), nearest first and at most 24;
     the real minecraft_lights.lua (in the fake RE4) puts its light objects on the 16 nearest Leon."""
     ensure_alive(re4)
+    # wall torches get their walls first (those "Changed the block" lines come before the mark); lit redstone ore
+    # would go out on a random tick
+    walls = [f"/setblock ~{d[0] - wall_of(name)[0]} ~{d[1]} ~{d[2] - wall_of(name)[1]} stone"
+             for name, *_, d in LIGHT_BLOCKS if wall_of(name) is not None]
+    run_commands(re4, ["/gamerule randomTickSpeed 0"] + walls)
     re4.run_for(0.5)
     mc.mark()
     run_commands(re4, [f"/setblock ~{d[0]} ~{d[1]} ~{d[2]} {name}" for name, _, _, _, d in LIGHT_BLOCKS])
@@ -519,6 +541,7 @@ def minecraft_lights(re4, mc):
     placed = [tuple(int(v) for v in m) for m in
               re.findall(r"Changed the block at (-?\d+), (-?\d+), (-?\d+)", "\n".join(mc.chat_since()))]
     if len(placed) != len(LIGHT_BLOCKS):
+        run_commands(re4, ["/gamerule randomTickSpeed 3"])
         return result("minecraft_lights", False, problem="blocks not placed", chat=mc.chat_since()[-6:])
     b = re4.bridge()
     anchor_mc = b.get("anchor") or {}
@@ -528,13 +551,19 @@ def minecraft_lights(re4, mc):
     def to_re4(x, y, z):
         return (anchor_re4.get("x", 0) + x - anchor_mc.get("x", 0), anchor_re4.get("y", 0) + y - anchor_mc.get("y", 0),
                 anchor_re4.get("z", 0) + z - anchor_mc.get("z", 0))
+
+    def centre(l):
+        """The middle of the block a listed light is in, in RE4 (Minecraft sorts the lights by it)."""
+        mc_at = (anchor_mc.get(k, 0) + l[i] - anchor_re4.get(k, 0) for i, k in enumerate("xyz"))
+        return to_re4(*(math.floor(v) + 0.5 for v in mc_at))
     player = to_re4(pos.get("x", 0), pos.get("y", 0), pos.get("z", 0))
     lights = parse_lights(b.get("lights"))
-    # every lit block once, at its spot (a torch's flame higher), with its level, colour kind and "inside" flag
+    # every lit block once, at its light's spot (a torch's flame: higher, and on a wall near the wall), with its
+    # level, colour kind and "inside" flag
     found, problems = {}, []
     for (name, level, kind, inside, _), at in zip(LIGHT_BLOCKS, placed):
-        lift = 0.7 if "torch" in name else 0.5
-        want = to_re4(at[0] + 0.5, at[1] + lift, at[2] + 0.5)
+        spot = light_spot(name)
+        want = to_re4(at[0] + spot[0], at[1] + spot[1], at[2] + spot[2])
         match = [l for l in lights if all(abs(l[i] - want[i]) < 0.002 for i in range(3))]
         found[name] = match[0] if match else None
         if level == 0:
@@ -544,8 +573,8 @@ def minecraft_lights(re4, mc):
             problems.append(f"{name} missing")
         elif match[0][3] != level or match[0][5] != inside or not colour_ok(kind, match[0][4]):
             problems.append(f"{name}: {match[0][3:]}")
-    dist = [math.dist(player, (l[0], l[1], l[2])) for l in lights]
-    nearest_first = all(dist[i] <= dist[i + 1] + 0.25 for i in range(len(dist) - 1))   # (torch flames sit 0.2 higher)
+    dist = [math.dist(player, centre(l)) for l in lights]
+    nearest_first = all(dist[i] <= dist[i + 1] + 0.01 for i in range(len(dist) - 1))
 
     # The real RE4 script: off, it does nothing; on, a lit light object on each light, then destroyed when off again
     made_before = len(fake_lights(re4))
@@ -564,10 +593,10 @@ def minecraft_lights(re4, mc):
     many = parse_lights(re4.bridge().get("lights"))
     every = [to_re4(at[0] + 0.5, at[1] + 0.5, at[2] + 0.5) for (n, lv, *_), at in zip(LIGHT_BLOCKS, placed) if lv > 0]
     every += [to_re4(x + 0.5, lo[1] + 0.5, z + 0.5) for x in range(lo[0], lo[0] + 6) for z in range(lo[2], lo[2] + 5)]
-    listed_far = max((math.dist(player, (l[0], l[1], l[2])) for l in many), default=0)
-    sent = {(round(l[0], 1), round(l[2], 1)) for l in many}
-    unlisted = [math.dist(player, p) for p in every if (round(p[0], 1), round(p[2], 1)) not in sent]
-    cap_ok = len(many) == 24 and listed_far <= min(unlisted, default=99) + 0.25
+    listed_far = max((math.dist(player, centre(l)) for l in many), default=0)
+    sent = {tuple(round(v, 1) for v in centre(l)) for l in many}
+    unlisted = [math.dist(player, p) for p in every if tuple(round(v, 1) for v in p) not in sent]
+    cap_ok = len(many) == 24 and listed_far <= min(unlisted, default=99) + 0.01
     shown_many = sum(1 for o in fake_lights(re4)[made_before:] if o[1])
 
     re4.L.execute("MinecraftRE4Lights.settings.enabled = false")
@@ -575,8 +604,10 @@ def minecraft_lights(re4, mc):
     destroyed = all(o[2] for o in fake_lights(re4)[made_before:])
     lo2 = [min(p[i] for p in placed) for i in range(3)]
     hi2 = [max(p[i] for p in placed) for i in range(3)]
+    # (the walls are inside the first box; a wall torch that loses its wall drops as an item: those are removed)
     run_commands(re4, [f"/fill {lo2[0]} {lo2[1]} {lo2[2]} {hi2[0]} {hi2[1]} {hi2[2]} air",
-                       f"/fill {lo[0]} {lo[1]} {lo[2]} {lo[0] + 5} {lo[1]} {lo[2] + 4} air"])
+                       f"/fill {lo[0]} {lo[1]} {lo[2]} {lo[0] + 5} {lo[1]} {lo[2] + 4} air",
+                       "/kill @e[type=item]", "/gamerule randomTickSpeed 3"])
     re4.run_for(1.0)
     none_left = re4.bridge().get("lights") == ""
     ok = (not problems and nearest_first and re4_ok and status == "on" and cap_ok and shown_many == 16 and destroyed

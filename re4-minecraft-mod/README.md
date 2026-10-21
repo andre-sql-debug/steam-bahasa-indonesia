@@ -70,11 +70,13 @@ pixels are cut out. Needs REFramework's **Loose File Loader** (`install.bat` tur
 blocks near you (torches, lanterns, campfires, jack o'lanterns, glowstone, shroomlights, sea lanterns, end rods,
 lit furnaces, lit candles, redstone torches, soul torches and lanterns...) become real RE4 point lights, so they
 light RE4's floors, walls, enemies and Leon like RE4's own lamps. The Minecraft mod sends the 24 light blocks
-nearest its player (each light's spot in RE4, its Minecraft light level and a colour per kind: warm orange for
-torches, lanterns and campfires, blue-cyan for soul ones, red for redstone, pale yellow for glowstone, cool white
-for sea lanterns and end rods, warm white for furnaces and candles), and `minecraft_lights.lua` keeps up to 16 RE4
-lights on the ones nearest Leon: brightness and reach (up to 8 m) follow the light level, and a light is only
-moved or changed when its block is. **Brightness** scales them all; **Lights cast shadows** is off by default
+nearest its player (each light's spot in RE4, a torch's at its flame, also on a wall; its Minecraft light level; and
+a colour per kind: warm orange for torches, lanterns and campfires, blue-cyan for soul ones, red for redstone
+torches and lit redstone ore, pale yellow for glowstone, cool white for sea lanterns and end rods, warm white for
+furnaces and candles), and `minecraft_lights.lua` keeps up to 16 RE4 lights on the ones nearest Leon: brightness
+and reach (up to 8 m) follow the light level, and a light is only moved or changed when its block is. The lights
+are on only while Minecraft is running and writing (lights left in the file by a Minecraft that was closed are never
+lit). **Brightness** scales them all; **Lights cast shadows** is off by default
 (slower; a light inside its own full block, like glowstone, never casts them). Needs no model files or Loose File
 Loader, only the two worlds lined up by terrain mode (`minecraft_terrain.lua`). Which of RE4's light settings
 exist isn't confirmed yet: each one is tried, and the section (and the diagnostics report) says which ones worked.

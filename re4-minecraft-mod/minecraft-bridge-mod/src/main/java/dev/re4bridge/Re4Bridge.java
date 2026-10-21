@@ -13,6 +13,7 @@ import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.packs.resources.Resource;
@@ -26,6 +27,9 @@ import net.minecraft.world.item.CrossbowItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.HorizontalDirectionalBlock;
+import net.minecraft.world.level.block.RedstoneWallTorchBlock;
+import net.minecraft.world.level.block.WallTorchBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.phys.AABB;
@@ -1117,8 +1121,8 @@ public class Re4Bridge implements ClientModInitializer {
             int rgb;
             if (n.contains("soul")) {
                 rgb = 0x58D2FF;   // soul torches, lanterns, campfires and fire: blue-cyan
-            } else if (n.startsWith("redstone_") && !n.equals("redstone_lamp")) {
-                rgb = 0xFF2A18;   // redstone torches and lit ore: red
+            } else if (n.contains("redstone_") && !n.equals("redstone_lamp")) {
+                rgb = 0xFF2A18;   // redstone torches and lit ore (also deepslate): red
             } else if (n.contains("torch") || n.contains("lantern") && !n.equals("sea_lantern") || n.contains("campfire")
                     || n.equals("fire") || n.contains("lava") || n.equals("magma_block")) {
                 rgb = 0xFF9A3C;   // torches, lanterns, campfires, jack o'lanterns, fire, lava: warm orange
@@ -1158,7 +1162,16 @@ public class Re4Bridge implements ClientModInitializer {
                 continue;
             }
             LightKind kind = lightKind(state);
-            Vec3 re4 = Re4Terrain.toRe4(pos.getX() + 0.5, pos.getY() + kind.lift(), pos.getZ() + 0.5);
+            double ox = 0.5, oy = kind.lift(), oz = 0.5;
+            if ((state.getBlock() instanceof WallTorchBlock || state.getBlock() instanceof RedstoneWallTorchBlock)
+                    && state.hasProperty(HorizontalDirectionalBlock.FACING)) {
+                // a wall torch's flame leans 0.27 toward the wall and is 0.92 high
+                Direction facing = state.getValue(HorizontalDirectionalBlock.FACING);
+                ox -= 0.27 * facing.getStepX();
+                oz -= 0.27 * facing.getStepZ();
+                oy = 0.92;
+            }
+            Vec3 re4 = Re4Terrain.toRe4(pos.getX() + ox, pos.getY() + oy, pos.getZ() + oz);
             if (re4 == null) {
                 return "";   // the two worlds aren't lined up yet
             }
