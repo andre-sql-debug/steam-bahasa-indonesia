@@ -2,9 +2,16 @@ package dev.re4bridge.mixin;
 
 import com.mojang.blaze3d.platform.Lighting;
 import com.mojang.blaze3d.systems.RenderSystem;
+import com.mojang.blaze3d.vertex.BufferBuilder;
+import com.mojang.blaze3d.vertex.BufferUploader;
+import com.mojang.blaze3d.vertex.DefaultVertexFormat;
+import com.mojang.blaze3d.vertex.MeshData;
 import com.mojang.blaze3d.vertex.PoseStack;
+import com.mojang.blaze3d.vertex.Tesselator;
+import com.mojang.blaze3d.vertex.VertexFormat;
 import dev.re4bridge.Re4Bridge;
 import dev.re4bridge.Re4Enemies;
+import dev.re4bridge.Re4Terrain;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
@@ -23,9 +30,12 @@ import net.minecraft.world.level.block.RenderShape;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fStack;
+
+import java.util.List;
 import org.lwjgl.opengl.GL11;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
@@ -61,6 +71,38 @@ public class LevelRendererMixin {
         }
     }
 
+    // RE4's floors and walls, invisible, into the depth buffer only: blocks, mobs and your character behind or
+    // under them are then hidden like in RE4 (a block sits in the floor instead of floating over it)
+    private static void re4bridge$re4Depth(Vec3 cam) {
+        List<AABB> boxes = Re4Terrain.occluders();
+        if (boxes.isEmpty()) {
+            return;
+        }
+        RenderSystem.setShader(GameRenderer::getPositionShader);
+        RenderSystem.colorMask(false, false, false, false);
+        RenderSystem.enableDepthTest();
+        RenderSystem.depthMask(true);
+        RenderSystem.disableCull();
+        BufferBuilder builder = Tesselator.getInstance().begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION);
+        for (AABB box : boxes) {
+            float x0 = (float) (box.minX - cam.x), y0 = (float) (box.minY - cam.y), z0 = (float) (box.minZ - cam.z);
+            float x1 = (float) (box.maxX - cam.x), y1 = (float) (box.maxY - cam.y), z1 = (float) (box.maxZ - cam.z);
+            // top, bottom, and the four sides
+            builder.addVertex(x0, y1, z0); builder.addVertex(x0, y1, z1); builder.addVertex(x1, y1, z1); builder.addVertex(x1, y1, z0);
+            builder.addVertex(x0, y0, z0); builder.addVertex(x1, y0, z0); builder.addVertex(x1, y0, z1); builder.addVertex(x0, y0, z1);
+            builder.addVertex(x0, y0, z0); builder.addVertex(x0, y1, z0); builder.addVertex(x1, y1, z0); builder.addVertex(x1, y0, z0);
+            builder.addVertex(x0, y0, z1); builder.addVertex(x1, y0, z1); builder.addVertex(x1, y1, z1); builder.addVertex(x0, y1, z1);
+            builder.addVertex(x0, y0, z0); builder.addVertex(x0, y0, z1); builder.addVertex(x0, y1, z1); builder.addVertex(x0, y1, z0);
+            builder.addVertex(x1, y0, z0); builder.addVertex(x1, y1, z0); builder.addVertex(x1, y1, z1); builder.addVertex(x1, y0, z1);
+        }
+        MeshData mesh = builder.build();
+        if (mesh != null) {
+            BufferUploader.drawWithShader(mesh);
+        }
+        RenderSystem.colorMask(true, true, true, true);
+        RenderSystem.enableCull();
+    }
+
     // The same steps renderLevel takes for its entities, for the ones near the player
     private void re4bridge$renderEntities(DeltaTracker deltaTracker, Camera camera, Matrix4f frustumMatrix, LightTexture lightTexture) {
         Entity cameraEntity = camera.getEntity();
@@ -77,6 +119,7 @@ public class LevelRendererMixin {
         RenderSystem.setShaderColor(shade, shade, shade, 1.0F);
 
         Vec3 cam = camera.getPosition();
+        re4bridge$re4Depth(cam);
         PoseStack poseStack = new PoseStack();
         MultiBufferSource.BufferSource buffers = this.renderBuffers.bufferSource();
         for (Entity entity : this.level.entitiesForRendering()) {

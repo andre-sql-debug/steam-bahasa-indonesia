@@ -6,9 +6,13 @@ import dev.re4bridge.Re4Puppet;
 import net.minecraft.client.Camera;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.GameRenderer;
+import net.minecraft.client.renderer.LightTexture;
+import net.minecraft.client.renderer.entity.EntityRenderDispatcher;
+import net.minecraft.world.entity.Entity;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
@@ -26,6 +30,16 @@ public class GameRendererMixin {
     @Inject(method = "render", at = @At("TAIL"))
     private void re4bridge$captureFrame(CallbackInfo ci) {
         Re4Bridge.onFrameRendered(Minecraft.getInstance());
+    }
+
+    // Your hand and held item in RE4: fully lit (Minecraft's own world may be at night while RE4's room is lit)
+    @Redirect(method = "renderItemInHand", at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/client/renderer/entity/EntityRenderDispatcher;getPackedLightCoords(Lnet/minecraft/world/entity/Entity;F)I"))
+    private int re4bridge$handLight(EntityRenderDispatcher dispatcher, Entity entity, float partialTick) {
+        if (Re4Bridge.overlayActive()) {
+            return LightTexture.FULL_BRIGHT;
+        }
+        return dispatcher.getPackedLightCoords(entity, partialTick);
     }
 
     // The field of view the world is drawn with (options FOV plus sprinting etc.), so RE4's camera can match;

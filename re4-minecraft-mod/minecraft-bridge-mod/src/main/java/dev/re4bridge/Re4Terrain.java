@@ -32,8 +32,11 @@ public final class Re4Terrain {
     private static final double BUCKET = 2.0;   // spatial hash cell size for lookups
 
     private record Snapshot(long epoch, double centerX, double centerZ, double radius,
-                            Map<Long, List<AABB>> buckets, int boxCount, long receivedMs) {
+                            Map<Long, List<AABB>> buckets, int boxCount, long receivedMs, List<AABB> occluders) {
     }
+
+    // RE4's floors sit this much lower for hiding things behind them, so feet standing on a floor don't flicker
+    private static final double OCCLUDER_SINK = 0.02;
 
     private static volatile Snapshot snapshot = null;
     private static volatile long anchorEpoch = 0;
@@ -93,6 +96,15 @@ public final class Re4Terrain {
             out.add(Shapes.create(box));
         }
         return out;
+    }
+
+    /** RE4's floors and walls as boxes, for hiding Minecraft things that are behind or under them. */
+    public static List<AABB> occluders() {
+        Snapshot s = snapshot;
+        if (s == null || !enforced || System.currentTimeMillis() - s.receivedMs() > FRESH_MS * 2) {
+            return List.of();
+        }
+        return s.occluders();
     }
 
     /** Terrain boxes touching an area. */
@@ -215,6 +227,7 @@ public final class Re4Terrain {
         double centerHeight = center.get("y").getAsDouble() - ay;
 
         Map<Long, List<AABB>> buckets = new HashMap<>();
+        List<AABB> occluders = new ArrayList<>();   // floors and walls (not the "no floor" columns)
         Map<Long, Double> heights = new HashMap<>();
         int count = 0;
         List<String[]> parsed = new ArrayList<>();
@@ -243,25 +256,30 @@ public final class Re4Terrain {
             }
             double h = Double.parseDouble(p[2]);
             add(buckets, new AABB(x0, anchorY + h - GROUND_THICKNESS, z0, x0 + cell, anchorY + h, z0 + cell));
+            occluders.add(new AABB(x0, anchorY + h - GROUND_THICKNESS, z0, x0 + cell, anchorY + h - OCCLUDER_SINK, z0 + cell));
             count++;
             if ((flags & 1) != 0) {
                 double hn = heights.getOrDefault(key(i + 1, k), h);
                 double xw = x0 + cell;
-                add(buckets, new AABB(xw - WALL_THICKNESS, anchorY + Math.min(h, hn), z0,
-                        xw + WALL_THICKNESS, anchorY + Math.max(h, hn) + WALL_HEIGHT, z0 + cell));
+                AABB wall = new AABB(xw - WALL_THICKNESS, anchorY + Math.min(h, hn), z0,
+                        xw + WALL_THICKNESS, anchorY + Math.max(h, hn) + WALL_HEIGHT, z0 + cell);
+                add(buckets, wall);
+                occluders.add(wall);
                 count++;
             }
             if ((flags & 2) != 0) {
                 double hn = heights.getOrDefault(key(i, k + 1), h);
                 double zw = z0 + cell;
-                add(buckets, new AABB(x0, anchorY + Math.min(h, hn), zw - WALL_THICKNESS,
-                        x0 + cell, anchorY + Math.max(h, hn) + WALL_HEIGHT, zw + WALL_THICKNESS));
+                AABB wall = new AABB(x0, anchorY + Math.min(h, hn), zw - WALL_THICKNESS,
+                        x0 + cell, anchorY + Math.max(h, hn) + WALL_HEIGHT, zw + WALL_THICKNESS);
+                add(buckets, wall);
+                occluders.add(wall);
                 count++;
             }
         }
         double cx = anchorX + (center.get("x").getAsDouble() - ax);
         double cz = anchorZ + (center.get("z").getAsDouble() - az);
-        snapshot = new Snapshot(anchorEpoch, cx, cz, radius, buckets, count, System.currentTimeMillis());
+        snapshot = new Snapshot(anchorEpoch, cx, cz, radius, buckets, count, System.currentTimeMillis(), occluders);
         return true;
     }
 }
