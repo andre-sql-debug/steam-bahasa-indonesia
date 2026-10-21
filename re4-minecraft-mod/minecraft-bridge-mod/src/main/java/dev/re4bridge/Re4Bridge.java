@@ -870,6 +870,8 @@ public class Re4Bridge implements ClientModInitializer {
             enemyDamage.addProperty(entry.getKey(), entry.getValue());
         }
         state.add("enemy_damage", enemyDamage);
+        // Which RE4 enemies Minecraft mobs are fighting, and where those mobs' eyes are (RE4 coordinates)
+        state.addProperty("engaged", Re4Enemies.engaged());
 
         JsonObject shot = new JsonObject();
         shot.addProperty("seq", shotSeq);

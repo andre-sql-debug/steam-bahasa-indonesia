@@ -26,7 +26,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * Minecraft mobs fight them (iron golems go after them by themselves, tamed wolves after what you hit).
  * Damage done to a stand-in is added up per enemy and sent back to RE4, which takes it off the real enemy.
  * Stand-ins never die in Minecraft; they disappear when the RE4 enemy dies or goes away.
- * RE4's enemies fight back: a mob that attacks one and stands within its reach gets hit by it.
+ * RE4's enemies fight back: a mob that attacks one and stands within its reach gets hit by it, and RE4 is told
+ * which mob each enemy is fighting (so the RE4 enemy looks at it, see minecraft_gameplay.lua).
  */
 public final class Re4Enemies {
     public static final String TAG = "re4_enemy";
@@ -35,6 +36,8 @@ public final class Re4Enemies {
     private static final float ENEMY_HIT = 4.0F;
     private static final int ENEMY_HIT_TICKS = 24;
     private static final double ENEMY_REACH = 2.2;
+    // A mob going for an RE4 enemy from this far away gets its attention
+    private static final double ENGAGE_RANGE = 16.0;
 
     /** One RE4 enemy, at its Minecraft position. */
     public record Target(String key, double x, double y, double z) {
@@ -48,6 +51,8 @@ public final class Re4Enemies {
     // Written on the server thread, read on the client thread
     private static final Map<UUID, String> keyOf = new ConcurrentHashMap<>();
     private static final Map<String, Float> damageTotals = new ConcurrentHashMap<>();
+    // "key,x,y,z;..." : each RE4 enemy a mob is going for, and that mob's eyes, in RE4's coordinates
+    private static volatile String engaged = "";
 
     private Re4Enemies() {
     }
@@ -82,6 +87,11 @@ public final class Re4Enemies {
         return keyOf.containsKey(entity.getUUID());
     }
 
+    /** The RE4 enemies Minecraft mobs are fighting, with where each mob's eyes are (RE4 coordinates). */
+    public static String engaged() {
+        return engaged;
+    }
+
     /** Total Minecraft damage per RE4 enemy so far. */
     public static Map<String, Float> damageTotals() {
         return damageTotals;
@@ -103,6 +113,7 @@ public final class Re4Enemies {
             return;
         }
         ServerLevel level = player.serverLevel();
+        StringBuilder engagedNow = new StringBuilder();
         Map<String, Target> wanted = new HashMap<>();
         for (Target t : targets) {
             wanted.put(t.key(), t);
@@ -146,9 +157,17 @@ public final class Re4Enemies {
                 }
                 husk.setHealth((float) MAX_HEALTH);
                 husk.clearFire();
-                hitBack(level, husk, t.key());
+                Mob attacker = nearestAttacker(level, husk);
+                if (attacker != null) {
+                    Vec3 eyes = Re4Terrain.toRe4(attacker.getX(), attacker.getEyeY(), attacker.getZ());
+                    if (eyes != null) {
+                        engagedNow.append(t.key()).append(',').append(String.format(java.util.Locale.ROOT, "%.2f,%.2f,%.2f;", eyes.x, eyes.y, eyes.z));
+                    }
+                    hitBack(level, husk, t.key(), attacker);
+                }
             }
         }
+        engaged = engagedNow.toString();
 
         // Stand-ins left over from an earlier game (saved with the world): remove them
         if (++sweepTicks >= 40) {
@@ -163,24 +182,30 @@ public final class Re4Enemies {
         }
     }
 
-    // The mob fighting this RE4 enemy, if it is in the enemy's reach, takes a blow now and then
-    private static void hitBack(ServerLevel level, Husk standIn, String key) {
-        long now = level.getGameTime();
-        Long last = lastHitTick.get(key);
-        if (last != null && now - last < ENEMY_HIT_TICKS) {
-            return;
-        }
-        AABB reach = standIn.getBoundingBox().inflate(ENEMY_REACH, 1.0, ENEMY_REACH);
+    // The nearest mob going for this RE4 enemy's stand-in, or null
+    private static Mob nearestAttacker(ServerLevel level, Husk standIn) {
+        AABB area = standIn.getBoundingBox().inflate(ENGAGE_RANGE, 4.0, ENGAGE_RANGE);
         Mob attacker = null;
         double best = Double.MAX_VALUE;
-        for (Mob mob : level.getEntitiesOfClass(Mob.class, reach, m -> m.isAlive() && m.getTarget() == standIn && !isStandIn(m))) {
+        for (Mob mob : level.getEntitiesOfClass(Mob.class, area, m -> m.isAlive() && m.getTarget() == standIn && !isStandIn(m))) {
             double d = mob.distanceToSqr(standIn);
             if (d < best) {
                 best = d;
                 attacker = mob;
             }
         }
-        if (attacker != null && attacker.hurt(level.damageSources().mobAttack(standIn), ENEMY_HIT)) {
+        return attacker;
+    }
+
+    // The mob fighting this RE4 enemy, if it is in the enemy's reach, takes a blow now and then
+    private static void hitBack(ServerLevel level, Husk standIn, String key, Mob attacker) {
+        long now = level.getGameTime();
+        Long last = lastHitTick.get(key);
+        if (last != null && now - last < ENEMY_HIT_TICKS) {
+            return;
+        }
+        AABB reach = standIn.getBoundingBox().inflate(ENEMY_REACH, 1.0, ENEMY_REACH);
+        if (attacker.getBoundingBox().intersects(reach) && attacker.hurt(level.damageSources().mobAttack(standIn), ENEMY_HIT)) {
             lastHitTick.put(key, now);
         }
     }

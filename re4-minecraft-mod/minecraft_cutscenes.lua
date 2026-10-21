@@ -26,12 +26,14 @@ local SCENE_REASONS = {
     get_IsWirelessCall = true,
 }
 
--- Leon's skeleton: from the shoulder/hip joint to the wrist/ankle joint (RE Engine names, a few spellings)
+-- Leon's skeleton: from the shoulder/hip joint to the wrist/ankle joint. RE4's names come first (as listed
+-- by minecraft_diagnostics.lua: R_UpperArm, R_Hand, R_Thigh, R_Foot...), then other RE Engine spellings.
+-- Joint names are case-sensitive.
 local LIMBS = {
-    right_arm = { { "r_arm_upper", "R_arm_upper", "r_arm_humerus", "r_upperarm" }, { "r_arm_wrist", "R_arm_wrist", "r_arm_hand", "r_hand" } },
-    left_arm = { { "l_arm_upper", "L_arm_upper", "l_arm_humerus", "l_upperarm" }, { "l_arm_wrist", "L_arm_wrist", "l_arm_hand", "l_hand" } },
-    right_leg = { { "r_leg_femur", "R_leg_femur", "r_leg_upper", "r_thigh" }, { "r_leg_ankle", "R_leg_ankle", "r_leg_foot", "r_foot" } },
-    left_leg = { { "l_leg_femur", "L_leg_femur", "l_leg_upper", "l_thigh" }, { "l_leg_ankle", "L_leg_ankle", "l_leg_foot", "l_foot" } },
+    right_arm = { { "R_UpperArm", "r_arm_upper", "R_arm_upper", "r_arm_humerus" }, { "R_Hand", "R_Forearm", "r_arm_wrist", "R_arm_wrist", "r_arm_hand" } },
+    left_arm = { { "L_UpperArm", "l_arm_upper", "L_arm_upper", "l_arm_humerus" }, { "L_Hand", "L_Forearm", "l_arm_wrist", "L_arm_wrist", "l_arm_hand" } },
+    right_leg = { { "R_Thigh", "r_leg_femur", "R_leg_femur", "r_leg_upper" }, { "R_Foot", "R_Shin", "r_leg_ankle", "R_leg_ankle", "r_leg_foot" } },
+    left_leg = { { "L_Thigh", "l_leg_femur", "L_leg_femur", "l_leg_upper" }, { "L_Foot", "L_Shin", "l_leg_ankle", "L_leg_ankle", "l_leg_foot" } },
 }
 
 local state = {

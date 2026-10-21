@@ -5,7 +5,9 @@
 --  * Leon's joint names (for your Minecraft character's arms and legs in cutscenes),
 --  * enemies near Leon and their health state,
 --  * who had Leon how often (minecraft_control.lua), frame rate, the latest data files,
---  * which RE4 functions run when RE4 itself hits an enemy ("Record real hits"), to make enemies flinch,
+--  * which RE4 functions run when RE4 itself hits an enemy ("Record real hits"), everything the hit carries
+--    and the enemy's animations in reaction, to make enemies flinch at Minecraft hits,
+--  * live tests: can RE4's own functions make an enemy look at a point, walk to it, or flinch again,
 --  * how RE4's enemies pick and attack a target, and what RE4 offers for adding objects to its world
 --    (so Minecraft mobs can become targets of RE4's enemies).
 -- It writes a report on its own after about a minute of play; "Save report now" writes one at any time.
@@ -353,13 +355,35 @@ re.on_pre_gui_draw_element(function(element, context)
 end)
 
 ------------------------------------------------------------------------------
--- Record real hits: which RE4 functions run when RE4 itself damages an enemy
+-- Record real hits: which RE4 functions run when RE4 itself damages an enemy, everything the hit carries
+-- (chainsaw.HitController.DamageInfo), and which animations the enemy plays in reaction
 ------------------------------------------------------------------------------
+
+-- The hit functions worth logging. Plain getters and setters are left out on purpose: many of them share
+-- one piece of machine code, so hooking one would log all of them (and they run all the time).
+local HIT_HOOKS = {
+    ["chainsaw.HitController"] = { "callbackDamageHit", "callbackAttackHit", "callbackCheckDamageHit",
+        "callbackCalculateDamage", "callbackCalculateDamageByAttacker", "setDamageCalcInfo", "poolDamage",
+        "checkKill", "playDamageEffect", "playDamageSe", "requestAttack" },
+    ["chainsaw.HitPoint"] = { "addDamage", "checkDead", "dead" },
+    ["chainsaw.EnemyManager"] = { "notifyHitDamage", "notifyDead" },
+    ["chainsaw.HitManager"] = { "registerDamage", "calcDamageDir" },
+}
 
 local recording = false
 local hook_counts = {}
 local hook_args = {}
 local hooked = {}
+local captures = {}        -- the first hits while recording: who was hit and every field of the DamageInfo
+local motion_log = {}      -- the nearest enemy's animation/state changes while recording, with the hits
+local replay = nil         -- the last hit on an enemy: { hc, info (a copy), body_address, frame }
+local MAX_CAPTURES = 4
+local MAX_MOTION_LOG = 300
+local last_motion_key = nil
+
+local motion_type = sdk.typeof("via.motion.Motion")
+local fsm_type = sdk.typeof("via.motion.MotionFsm2")
+local hit_controller_type = sdk.typeof("chainsaw.HitController")
 
 local function arg_types(args)
     local out = {}
@@ -373,21 +397,117 @@ local function arg_types(args)
     return table.concat(out, ", ")
 end
 
+local function address_of(obj)
+    local ok, a = pcall(function() return obj:get_address() end)
+    return ok and a or nil
+end
+
+-- Every field of a managed object (and of the game's objects it holds, one level deep), as text and numbers
+local dump_fields
+local function value_of(v, depth)
+    local t = type(v)
+    if v == nil then return "nil" end
+    if t == "number" or t == "boolean" or t == "string" then return v end
+    local okv, vs = pcall(function() return string.format("(%.3f, %.3f, %.3f)", v.x, v.y, v.z) end)
+    if okv then return vs end
+    local okt, tn = pcall(function() return v:get_type_definition():get_full_name() end)
+    if okt and tn ~= nil then
+        if depth < 1 and tn:find("^chainsaw%.") then return { type = tn, fields = dump_fields(v, depth + 1) } end
+        return tn
+    end
+    return tostring(v)
+end
+
+dump_fields = function(obj, depth)
+    local out = {}
+    local okt, td = pcall(function() return obj:get_type_definition() end)
+    local level = 0
+    while okt and td ~= nil and level < 10 do
+        local tname = td:get_full_name()
+        if tname == "System.Object" or tname == "System.ValueType" then break end
+        for _, f in ipairs(td:get_fields() or {}) do
+            local okf, name, static = pcall(function() return f:get_name(), f:is_static() end)
+            if okf and not static then
+                local okv, v = pcall(function() return f:get_data(obj) end)
+                local okft, ft = pcall(function() return f:get_type():get_full_name() end)
+                out[#out + 1] = { name = name, type = okft and ft or "?", value = okv and value_of(v, depth) or "?" }
+            end
+        end
+        local okp, parent = pcall(function() return td:get_parent_type() end)
+        td = okp and parent or nil
+        level = level + 1
+    end
+    return out
+end
+
+-- The animation an enemy is playing (bank/motion numbers) and its behavior state, as one line
+local function motion_state(enemy)
+    local body = try_call(enemy, "get_BodyGameObject")
+    if body == nil then return "no body" end
+    local parts = {}
+    local motion = motion_type and try_call(body, "getComponent(System.Type)", motion_type)
+    local layer = motion and try_call(motion, "getLayer", 0)
+    if layer ~= nil then
+        parts[#parts + 1] = string.format("motion %s/%s", tostring(try_call(layer, "get_MotionBankID")),
+            tostring(try_call(layer, "get_MotionID")))
+    end
+    local fsm = fsm_type and try_call(body, "getComponent(System.Type)", fsm_type)
+    if fsm ~= nil then
+        local node = try_call(fsm, "getCurrentNodeName", 0)
+        if node ~= nil then parts[#parts + 1] = "state " .. tostring(node) end
+    end
+    return #parts > 0 and table.concat(parts, ", ") or "no motion info"
+end
+
+local function note_motion(text)
+    if #motion_log < MAX_MOTION_LOG then motion_log[#motion_log + 1] = string.format("[%d] %s", frames, text) end
+end
+
+-- A hit landed on someone (callbackDamageHit runs on the HitController of whoever was hit)
+local function on_damage_hit(args)
+    local hc = sdk.to_managed_object(args[2])
+    local info = sdk.to_managed_object(args[3])
+    if hc == nil or info == nil then return end
+    local go = try_call(hc, "get_GameObject")
+    local name = go and try_call(go, "get_Name") or "?"
+    local ctx = player_context()
+    local leon_body = ctx and try_call(ctx, "get_BodyGameObject")
+    local on_leon = leon_body ~= nil and go ~= nil and address_of(leon_body) == address_of(go)
+    note_motion("HIT on " .. tostring(name) .. (on_leon and " (Leon)" or ""))
+    if #captures < MAX_CAPTURES then
+        captures[#captures + 1] = { frame = frames, hit = tostring(name), on_leon = on_leon, fields = dump_fields(info, 0) }
+    end
+    if not on_leon then
+        -- Keep a copy for the flinch test (RE4 may reuse the original for its next hit)
+        local okc, copy = pcall(function() return info:call("MemberwiseClone") end)
+        if okc and copy ~= nil then
+            pcall(function() copy:add_ref() end)
+            pcall(function() hc:add_ref() end)
+            replay = { hc = hc, info = copy, body_address = address_of(go), name = tostring(name), frame = frames }
+        end
+    end
+end
+
 local function hook_all()
-    for _, type_name in ipairs({ "chainsaw.HitPoint", "chainsaw.HitController", "chainsaw.EnemyManager" }) do
+    for type_name, names in pairs(HIT_HOOKS) do
         local td = sdk.find_type_definition(type_name)
         for _, m in ipairs(td and td:get_methods() or {}) do
             local ok, n = pcall(function() return m:get_name() end)
-            local key = type_name .. "." .. tostring(n)
-            -- only damage/death related, and never plain getters (they run all the time)
-            if ok and n and interesting(n) and not n:find("^get_") and not hooked[key] then
+            local wanted = false
+            for _, w in ipairs(names) do
+                if n == w then wanted = true end
+            end
+            local okp, params = pcall(function() return m:get_num_params() end)
+            local key = type_name .. "." .. tostring(n) .. "/" .. tostring(okp and params or "?")
+            if ok and wanted and not hooked[key] then
                 hooked[key] = true
+                local is_damage_hit = type_name == "chainsaw.HitController" and n == "callbackDamageHit"
                 pcall(function()
                     sdk.hook(m, function(args)
-                        if recording then
-                            hook_counts[key] = (hook_counts[key] or 0) + 1
-                            if hook_args[key] == nil then hook_args[key] = arg_types(args) end
-                        end
+                        if not recording then return end
+                        hook_counts[key] = (hook_counts[key] or 0) + 1
+                        if hook_args[key] == nil then hook_args[key] = arg_types(args) end
+                        if is_damage_hit then pcall(on_damage_hit, args) end
                     end, function(retval) return retval end)
                 end)
             end
@@ -396,11 +516,31 @@ local function hook_all()
 end
 
 ------------------------------------------------------------------------------
--- Damage tests on the nearest enemy (they change the game: only when you press them)
+-- Tests on the nearest enemy (they change the game: only when you press them)
 ------------------------------------------------------------------------------
 
 local test_results = {}
 local pending_test = nil
+
+local function nearest_live_enemy()
+    local cm = sdk.get_managed_singleton(sdk.game_namespace("CharacterManager"))
+    local list = cm and try_call(cm, "get_EnemyContextList")
+    local count = list and try_call(list, "get_Count") or 0
+    local ctx = player_context()
+    local body = ctx and try_call(ctx, "get_BodyGameObject")
+    local me = body and try_call(try_call(body, "get_Transform"), "get_Position")
+    local best, best_d = nil, math.huge
+    for i = 0, count - 1 do
+        local e = try_call(list, "get_Item", i)
+        local hp = e and try_call(e, "get_HitPoint")
+        local pos = e and try_call(e, "get_Position")
+        if pos ~= nil and me ~= nil and hp ~= nil and try_call(hp, "get_IsLive") == true then
+            local d = (pos - me):length()
+            if d < best_d then best, best_d = e, d end
+        end
+    end
+    return best, me
+end
 
 local function run_test(kind)
     local _, enemy = nearest_enemies(1)
@@ -426,14 +566,371 @@ local function run_test(kind)
         tostring(result.after.current), tostring(before.live), tostring(result.after.live), err and (" error " .. err) or ""))
 end
 
+------------------------------------------------------------------------------
+-- Live tests: can RE4's own functions make an enemy look at, walk to, or flinch from something else?
+-- Each runs for a few seconds on the nearest living enemy and measures what happened by itself.
+------------------------------------------------------------------------------
+
+local live = nil           -- the running test
+local live_results = {}
+local LOOK_BASE_FRAMES, LOOK_FRAMES = 45, 90
+local WALK_BASE_FRAMES, WALK_FRAMES = 60, 180
+local FLINCH_FRAMES = 90
+
+local function find_method_in(td, name)
+    local depth = 0
+    while td ~= nil and depth < 12 do
+        local ok, m = pcall(function() return td:get_method(name) end)
+        if ok and m ~= nil then return m end
+        local okp, parent = pcall(function() return td:get_parent_type() end)
+        td = okp and parent or nil
+        depth = depth + 1
+    end
+    return nil
+end
+
+-- Components of the enemy's body that have this method: { { comp, method, type } ... }
+local function components_with(enemy, signature, second)
+    local out = {}
+    local body = try_call(enemy, "get_BodyGameObject")
+    local comps = body and try_call(body, "get_Components")
+    local ok, elems = pcall(function() return comps:get_elements() end)
+    if not ok or elems == nil then return out end
+    for _, comp in ipairs(elems) do
+        local okt, td = pcall(function() return comp:get_type_definition() end)
+        if okt and td ~= nil then
+            local m = find_method_in(td, signature)
+            if m ~= nil then
+                out[#out + 1] = { comp = comp, method = m, second = second and find_method_in(td, second) or nil,
+                    type = td:get_full_name() }
+            end
+        end
+    end
+    return out
+end
+
+local function q_rotate(q, v)
+    -- v rotated by the unit quaternion q
+    local qx, qy, qz, qw = q.x, q.y, q.z, q.w
+    local tx = 2 * (qy * v.z - qz * v.y)
+    local ty = 2 * (qz * v.x - qx * v.z)
+    local tz = 2 * (qx * v.y - qy * v.x)
+    return { x = v.x + qw * tx + (qy * tz - qz * ty), y = v.y + qw * ty + (qz * tx - qx * tz),
+        z = v.z + qw * tz + (qx * ty - qy * tx) }
+end
+
+local AXES = { { x = 1, y = 0, z = 0 }, { x = -1, y = 0, z = 0 }, { x = 0, y = 1, z = 0 }, { x = 0, y = -1, z = 0 },
+    { x = 0, y = 0, z = 1 }, { x = 0, y = 0, z = -1 } }
+
+local function cos_to(dir, from, to)
+    local dx, dy, dz = to.x - from.x, to.y - from.y, to.z - from.z
+    local len = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if len < 0.01 then return 0 end
+    return (dir.x * dx + dir.y * dy + dir.z * dz) / len
+end
+
+local function enemy_head(enemy)
+    local body = try_call(enemy, "get_BodyGameObject")
+    local tr = body and try_call(body, "get_Transform")
+    for _, name in ipairs({ "Head", "head", "Neck_1", "Neck_0" }) do
+        local j = tr and try_call(tr, "getJointByName", name)
+        if j ~= nil then return j, name end
+    end
+    return nil
+end
+
+-- A point beside the enemy (perpendicular to the line to Leon), at head height
+local function side_point(epos, me, distance, height)
+    local dx, dz = me.x - epos.x, me.z - epos.z
+    local len = math.sqrt(dx * dx + dz * dz)
+    if len < 0.01 then dx, dz, len = 1, 0, 1 end
+    return Vector3f.new(epos.x - dz / len * distance, epos.y + height, epos.z + dx / len * distance)
+end
+
+local function start_live(kind)
+    if live ~= nil then log("a test is already running") return end
+    local enemy, me = nearest_live_enemy()
+    if enemy == nil or me == nil then log("live test: no living enemy near Leon") return end
+    local epos = try_call(enemy, "get_Position")
+    local okt, etype = pcall(function() return enemy:get_type_definition():get_full_name() end)
+    live = { kind = kind, enemy = enemy, frame = 0, result = { test = kind, enemy = okt and etype or "?" } }
+    local r = live.result
+    if kind == "look" then
+        live.handles = components_with(enemy, "setForceLookAtTarget(via.vec3)", "clearForceLookAtTarget")
+        live.head, r.head_joint = enemy_head(enemy)
+        live.target = side_point(epos, me, 3.0, 1.6)
+        live.samples = {}
+        r.components = {}
+        for _, h in ipairs(live.handles) do r.components[#r.components + 1] = h.type end
+        if #live.handles == 0 then r.result = "no component with setForceLookAtTarget(via.vec3)" end
+        if live.head == nil then r.result = (r.result and (r.result .. "; ") or "") .. "no head joint" end
+    elseif kind == "walk" then
+        live.handles = components_with(enemy, "set_TargetPos(via.vec3)")
+        live.target = side_point(epos, me, 4.0, 0.0)
+        live.start = epos
+        live.path = {}
+        r.components = {}
+        for _, h in ipairs(live.handles) do r.components[#r.components + 1] = h.type end
+        if #live.handles == 0 then r.result = "no component with set_TargetPos(via.vec3)" end
+    elseif kind == "flinch" then
+        local body = try_call(enemy, "get_BodyGameObject")
+        if replay == nil then
+            r.result = "no recorded hit: Start recording, hit an enemy once with the knife, then press this"
+        elseif address_of(body) ~= replay.body_address then
+            -- replay on the enemy that was really hit (its own colliders and joints), if it is still alive
+            local cm = sdk.get_managed_singleton(sdk.game_namespace("CharacterManager"))
+            local list = cm and try_call(cm, "get_EnemyContextList")
+            local count = list and try_call(list, "get_Count") or 0
+            local found = nil
+            for i = 0, count - 1 do
+                local e = try_call(list, "get_Item", i)
+                local b = e and try_call(e, "get_BodyGameObject")
+                local hp = e and try_call(e, "get_HitPoint")
+                if b ~= nil and address_of(b) == replay.body_address and hp ~= nil and try_call(hp, "get_IsLive") == true then found = e end
+            end
+            if found == nil then
+                r.result = "the enemy you hit while recording is dead or gone: record a hit on a living one"
+            else
+                live.enemy = found
+                okt, etype = pcall(function() return found:get_type_definition():get_full_name() end)
+                r.enemy = okt and etype or "?"
+            end
+        end
+        r.replayed_hit = replay and replay.name or nil
+        live.changes = {}
+    end
+    if r.result ~= nil then
+        live_results[#live_results + 1] = r
+        log("live test " .. kind .. ": " .. r.result)
+        live = nil
+        return
+    end
+    log("live test " .. kind .. " running on " .. r.enemy .. "...")
+end
+
+local function finish_live()
+    local r = live.result
+    live_results[#live_results + 1] = r
+    log("live test " .. live.kind .. ": " .. tostring(r.result))
+    live = nil
+    report_now = true
+end
+
+-- One frame of the running test (before RE4's behavior update)
+local function step_live()
+    local t = live
+    t.frame = t.frame + 1
+    local enemy = t.enemy
+    local hp = try_call(enemy, "get_HitPoint")
+    if hp == nil or try_call(hp, "get_IsLive") ~= true then
+        t.result.result = string.format("stopped: the enemy died or went away at frame %d", t.frame)
+        if t.kind == "look" then
+            for _, h in ipairs(t.handles) do if h.second then pcall(function() h.second:call(h.comp) end) end end
+        end
+        finish_live()
+        return
+    end
+    local epos = try_call(enemy, "get_Position")
+    local ctx = player_context()
+    local lbody = ctx and try_call(ctx, "get_BodyGameObject")
+    local me = lbody and try_call(try_call(lbody, "get_Transform"), "get_Position")
+
+    if t.kind == "look" then
+        -- First a while without forcing (does the head follow Leon?), then forced toward a point beside the enemy
+        local forcing = t.frame > LOOK_BASE_FRAMES
+        if forcing then
+            for _, h in ipairs(t.handles) do
+                local ok, err = pcall(function() h.method:call(h.comp, t.target) end)
+                if not ok and t.result.error == nil then t.result.error = tostring(err) end
+            end
+        end
+        local q = try_call(t.head, "get_Rotation")
+        local hpos = try_call(t.head, "get_Position")
+        if q ~= nil and hpos ~= nil and me ~= nil then
+            t.samples[#t.samples + 1] = { forcing = forcing, q = { x = q.x, y = q.y, z = q.z, w = q.w },
+                head = { x = hpos.x, y = hpos.y, z = hpos.z }, leon = { x = me.x, y = me.y + 1.6, z = me.z } }
+        end
+        if t.frame >= LOOK_BASE_FRAMES + LOOK_FRAMES then
+            for _, h in ipairs(t.handles) do if h.second then pcall(function() h.second:call(h.comp) end) end end
+            -- Which head axis points where the enemy looks: the one best aimed at Leon before forcing
+            local best_axis, best_score = nil, -math.huge
+            for ai, axis in ipairs(AXES) do
+                local sum, n = 0, 0
+                for _, s in ipairs(t.samples) do
+                    if not s.forcing then sum = sum + cos_to(q_rotate(s.q, axis), s.head, s.leon); n = n + 1 end
+                end
+                if n > 0 and sum / n > best_score then best_axis, best_score = ai, sum / n end
+            end
+            local to_target, to_leon, n = 0, 0, 0
+            for _, s in ipairs(t.samples) do
+                if s.forcing and best_axis ~= nil then
+                    local dir = q_rotate(s.q, AXES[best_axis])
+                    to_target = to_target + cos_to(dir, s.head, t.target)
+                    to_leon = to_leon + cos_to(dir, s.head, s.leon)
+                    n = n + 1
+                end
+            end
+            t.result.head_axis = best_axis
+            t.result.before_aim_at_leon = best_score
+            t.result.forced_aim_at_target = n > 0 and to_target / n or nil
+            t.result.forced_aim_at_leon = n > 0 and to_leon / n or nil
+            t.result.result = (n > 0 and to_target / n > 0.8) and "the head turned to the point (look-at works)"
+                or "the head did not clearly turn to the point"
+            finish_live()
+        end
+    elseif t.kind == "walk" then
+        local forcing = t.frame > WALK_BASE_FRAMES
+        if forcing then
+            for _, h in ipairs(t.handles) do
+                local ok, err = pcall(function() h.method:call(h.comp, t.target) end)
+                if not ok and t.result.error == nil then t.result.error = tostring(err) end
+            end
+        end
+        if epos ~= nil then t.path[#t.path + 1] = { forcing = forcing, x = epos.x, y = epos.y, z = epos.z } end
+        if t.frame >= WALK_BASE_FRAMES + WALK_FRAMES then
+            local function dist(p, q) return math.sqrt((p.x - q.x) ^ 2 + (p.z - q.z) ^ 2) end
+            local first_forced, last = nil, t.path[#t.path]
+            for _, p in ipairs(t.path) do if p.forcing then first_forced = p break end end
+            t.result.target_distance_start = first_forced and dist(first_forced, t.target) or nil
+            t.result.target_distance_end = last and dist(last, t.target) or nil
+            t.result.moved = (first_forced and last) and dist(first_forced, last) or nil
+            t.result.leon_distance_end = (last and me) and dist(last, me) or nil
+            local closer = (t.result.target_distance_start or 0) - (t.result.target_distance_end or 0)
+            t.result.result = closer > 1.5 and "the enemy walked toward the point (navigation target works)"
+                or "the enemy did not walk to the point"
+            finish_live()
+        end
+    elseif t.kind == "flinch" then
+        local state = motion_state(enemy)
+        if t.frame == 1 then
+            t.result.hp_before = try_call(hp, "get_CurrentHitPoint")
+            t.result.motion_before = state
+            t.last_state = state
+            local ok, err = pcall(function() replay.hc:call("callbackDamageHit(chainsaw.HitController.DamageInfo)", replay.info) end)
+            t.result.call = ok and "called" or ("failed: " .. tostring(err))
+            t.result.hp_after_call = try_call(hp, "get_CurrentHitPoint")
+        elseif state ~= t.last_state then
+            t.changes[#t.changes + 1] = string.format("[%d] %s", t.frame, state)
+            t.last_state = state
+        end
+        if t.frame == 3 then
+            -- give back the health the replayed hit took (the test is about the reaction)
+            local before, now = t.result.hp_before, try_call(hp, "get_CurrentHitPoint")
+            if before ~= nil and now ~= nil and now < before and now > 0 then try_call(hp, "set_CurrentHitPoint", before) end
+        end
+        if t.frame >= FLINCH_FRAMES then
+            t.result.motion_changes = t.changes
+            t.result.result = #t.changes > 0 and "the enemy's animation changed after the replayed hit (watch: did it flinch?)"
+                or "no animation change after the replayed hit"
+            finish_live()
+        end
+    end
+end
+
 re.on_pre_application_entry("UpdateBehavior", function()
     if pending_test ~= nil then
         local k = pending_test
         pending_test = nil
-        local ok, e = pcall(run_test, k)
-        if not ok then log("test error: " .. tostring(e)) end
+        if k == "look" or k == "walk" or k == "flinch" then
+            local ok, e = pcall(start_live, k)
+            if not ok then log("live test error: " .. tostring(e)); live = nil end
+        else
+            local ok, e = pcall(run_test, k)
+            if not ok then log("test error: " .. tostring(e)) end
+        end
+    end
+    if live ~= nil then
+        local ok, e = pcall(step_live)
+        if not ok then
+            log("live test error: " .. tostring(e))
+            if live ~= nil then
+                live.result.result = "error: " .. tostring(e)
+                live_results[#live_results + 1] = live.result
+                live = nil
+            end
+        end
+    end
+    -- While recording: the nearest enemy's animation/state changes, next to the hits
+    if recording and frames % 2 == 0 then
+        local enemy = nearest_live_enemy()
+        if enemy ~= nil then
+            local state = motion_state(enemy)
+            local ok, address = pcall(function() return enemy:get_address() end)
+            local key = (ok and tostring(address) or "?") .. " " .. state
+            if key ~= last_motion_key then
+                last_motion_key = key
+                note_motion(state)
+            end
+        end
     end
 end)
+
+-- The walk test also sets the target late in the frame, after RE4's own behavior had its say
+re.on_application_entry("LateUpdateBehavior", function()
+    if live ~= nil and live.kind == "walk" and live.frame > WALK_BASE_FRAMES then
+        for _, h in ipairs(live.handles) do pcall(function() h.method:call(h.comp, live.target) end) end
+    end
+end)
+
+------------------------------------------------------------------------------
+-- Every member of the types a hit and a reaction are made of (for building them for Minecraft hits)
+------------------------------------------------------------------------------
+
+local FULL_TYPES = { "chainsaw.HitController.DamageInfo", "chainsaw.HitController.DamageValue",
+    "chainsaw.HitController.CalculateInfo", "chainsaw.collision.AttackHitUserData.AttackData",
+    "chainsaw.collision.HitInfo", "chainsaw.LookAtRequest", "via.motion.TreeLayer" }
+local KEYWORD_TYPES = {
+    ["via.behaviortree.BehaviorTree"] = { "node", "layer", "tree" },
+    ["via.motion.Motion"] = { "layer", "motion", "bank" },
+    ["chainsaw.Ch1c0BodyUpdaterCommon"] = { "damage", "wince", "react", "flinch", "stagger", "knock", "down", "stun",
+        "hit", "rotate", "turn", "attack", "target", "look" },
+    ["chainsaw.EnemyBodyUpdater"] = { "damage", "wince", "react", "flinch", "stagger", "knock", "down", "stun", "hit",
+        "rotate", "turn", "attack", "target", "look" },
+    ["chainsaw.CharacterBodyUpdater"] = { "damage", "wince", "react", "hit", "attack", "target", "look" },
+}
+
+local function members(td, keywords, limit)
+    local out = {}
+    local depth = 0
+    while td ~= nil and depth < 8 and #out < limit do
+        local tname = td:get_full_name()
+        if tname:find("^System%.") or tname:find("^via%.clr") then break end
+        local function wanted(n)
+            if keywords == nil then return true end
+            local l = n:lower()
+            for _, k in ipairs(keywords) do if l:find(k, 1, true) then return true end end
+            return false
+        end
+        for _, m in ipairs(td:get_methods() or {}) do
+            local ok, n = pcall(function() return m:get_name() end)
+            if ok and n and wanted(n) and #out < limit then out[#out + 1] = tname .. " :: " .. signature(m) end
+        end
+        for _, f in ipairs(td:get_fields() or {}) do
+            local ok, n = pcall(function() return f:get_name() end)
+            if ok and n and wanted(n) and #out < limit then
+                local ft = f:get_type()
+                out[#out + 1] = tname .. " :: field " .. (ft and ft:get_full_name() or "?") .. " " .. n
+            end
+        end
+        local okp, parent = pcall(function() return td:get_parent_type() end)
+        td = okp and parent or nil
+        depth = depth + 1
+    end
+    return out
+end
+
+local function type_dumps()
+    local out = {}
+    for _, name in ipairs(FULL_TYPES) do
+        local td = sdk.find_type_definition(name)
+        out[name] = td and members(td, nil, 300) or "not found"
+    end
+    for name, keywords in pairs(KEYWORD_TYPES) do
+        local td = sdk.find_type_definition(name)
+        out[name] = td and members(td, keywords, 250) or "not found"
+    end
+    return out
+end
 
 ------------------------------------------------------------------------------
 -- The report
@@ -468,7 +965,10 @@ write_report = function()
         enemies = enemies,
         camera = camera_info(),
         damage_tests = test_results,
-        real_hits = { calls = hook_counts, first_call_arguments = hook_args },
+        live_tests = live_results,
+        real_hits = { calls = hook_counts, first_call_arguments = hook_args, captured_hits = captures,
+            nearest_enemy_motion = motion_log, flinch_test_ready = replay ~= nil },
+        hit_and_reaction_types = type_dumps(),
         gui_elements = gui,
         minecraft = type(bridge) == "table" and { in_world = bridge.in_world, re4_control = bridge.re4_control,
             overlay = bridge.overlay, authority = bridge.authority, terrain_boxes = bridge.terrain_boxes,
@@ -492,11 +992,11 @@ re.on_draw_ui(function()
         fps.min and string.format("%.0f", fps.min) or "?"))
 
     imgui.text("Record real hits (to make enemies flinch at Minecraft hits):")
-    imgui.text("  1. Start   2. F7 (RE4 plays)   3. knife and shoot an enemy   4. F7 again   5. Stop")
+    imgui.text("  1. Start   2. F7 (RE4 plays)   3. knife an enemy (and shoot one)   4. F7 again   5. Stop")
     if not recording then
         if imgui.button("Start recording") then
             hook_all()
-            hook_counts, hook_args = {}, {}
+            hook_counts, hook_args, captures, motion_log = {}, {}, {}, {}
             recording = true
             log("recording real hits...")
         end
@@ -508,6 +1008,19 @@ re.on_draw_ui(function()
             log("recorded " .. n .. " different functions")
             report_now = true
         end
+    end
+
+    imgui.text("Live tests on the nearest enemy (a few seconds each; the report saves itself after each):")
+    if live ~= nil then
+        imgui.text("  running: " .. live.kind .. " (" .. live.frame .. " frames)")
+    else
+        if imgui.button("Look test") then pending_test = "look" end
+        imgui.same_line()
+        if imgui.button("Walk test") then pending_test = "walk" end
+        imgui.same_line()
+        if imgui.button("Flinch test") then pending_test = "flinch" end
+        imgui.text(replay ~= nil and ("  flinch test replays your knife hit on " .. replay.name)
+            or "  flinch test: first record a knife hit on an enemy (above)")
     end
 
     imgui.text("Tests on the nearest enemy (they change the game):")

@@ -75,6 +75,15 @@ public final class Re4Terrain {
         return new Vec3(anchorX + (x - anchorRe4X), anchorY + (y - anchorRe4Y), anchorZ + (z - anchorRe4Z));
     }
 
+    /** A Minecraft position in RE4's world, or null while the two worlds aren't lined up. */
+    public static Vec3 toRe4(double x, double y, double z) {
+        long epoch = anchorEpoch;
+        if (epoch == 0 || anchorRe4Epoch != epoch) {
+            return null;
+        }
+        return new Vec3(anchorRe4X + (x - anchorX), anchorRe4Y + (y - anchorY), anchorRe4Z + (z - anchorZ));
+    }
+
     public static void setAnchor(long epoch, double x, double y, double z) {
         anchorX = x;
         anchorY = y;

@@ -20,6 +20,7 @@
 local settings = {
     movement = true,
     combat = true,
+    enemies_look_at_mobs = true,
     no_damage = true,
     swap_left_right = false,
     fly_speed = 10.9,       -- m/s, only without Minecraft
@@ -76,6 +77,7 @@ local debug = {
     ground = "?",
     combat = "no attack yet",
     damage = "not checked yet",
+    attention = "no fights",
 }
 
 local state = {
@@ -794,6 +796,118 @@ local function update_enemy_damage()
     end
 end
 
+-- RE4 enemies that a Minecraft mob is fighting look at that mob, with the enemy's own look-at (the one RE4
+-- uses to make an enemy watch something): Minecraft sends "key,x,y,z;" per fight, with the mob's eyes in RE4
+-- coordinates. The look is let go when the fight ends, the enemy dies, or RE4 takes over (cutscenes, menus).
+local attention = {}   -- enemy key -> { look = { comp, set, clear } or false, looked_up = frame }
+local LOOK_REFRESH_FRAMES = 2
+local LOOK_RETRY_FRAMES = 300
+
+local function find_method_in(td, name)
+    local depth = 0
+    while td ~= nil and depth < 12 do
+        local ok, m = pcall(function() return td:get_method(name) end)
+        if ok and m ~= nil then return m end
+        local okp, parent = pcall(function() return td:get_parent_type() end)
+        td = okp and parent or nil
+        depth = depth + 1
+    end
+    return nil
+end
+
+-- The component of this enemy that has RE4's "look at this point" (enemies' body updaters), or false
+local function look_handle(enemy)
+    local body = try_call(enemy, "get_BodyGameObject")
+    local comps = body and try_call(body, "get_Components")
+    local ok, elems = pcall(function() return comps:get_elements() end)
+    if not ok or elems == nil then return false end
+    for _, comp in ipairs(elems) do
+        local okt, td = pcall(function() return comp:get_type_definition() end)
+        if okt and td ~= nil then
+            local set = find_method_in(td, "setForceLookAtTarget(via.vec3)")
+            if set ~= nil then
+                return { comp = comp, set = set, clear = find_method_in(td, "clearForceLookAtTarget") }
+            end
+        end
+    end
+    return false
+end
+
+local function let_go(a)
+    if a.look and a.look.clear then pcall(function() a.look.clear:call(a.look.comp) end) end
+end
+
+local function release_attention()
+    for key, a in pairs(attention) do
+        let_go(a)
+        attention[key] = nil
+    end
+end
+
+-- The living enemies right now: key -> enemy context
+local function living_enemies()
+    local out = {}
+    local cm = get_character_manager()
+    local list = cm and try_call(cm, "get_EnemyContextList")
+    local count = list and try_call(list, "get_Count") or 0
+    for i = 0, count - 1 do
+        local enemy = try_call(list, "get_Item", i)
+        local ok, address = pcall(function() return enemy:get_address() end)
+        if ok and address ~= nil and enemy_alive(try_call(enemy, "get_HitPoint")) then out[tostring(address)] = enemy end
+    end
+    return out
+end
+
+local function update_enemy_attention()
+    local wanted, count = {}, 0
+    if settings.enemies_look_at_mobs and type(bridge.engaged) == "string" then
+        for key, x, y, z in bridge.engaged:gmatch("([^,;]+),([^,;]+),([^,;]+),([^,;]+);") do
+            local px, py, pz = tonumber(x), tonumber(y), tonumber(z)
+            if px ~= nil and py ~= nil and pz ~= nil then
+                wanted[key] = Vector3f.new(px, py, pz)
+                count = count + 1
+            end
+        end
+    end
+    -- Fights that ended
+    for key, a in pairs(attention) do
+        if wanted[key] == nil then
+            let_go(a)
+            attention[key] = nil
+        end
+    end
+    if count == 0 then
+        debug.attention = "no fights"
+        return
+    end
+    if state.frame % LOOK_REFRESH_FRAMES ~= 0 then return end
+
+    local living = living_enemies()
+    local looking = 0
+    for key, target in pairs(wanted) do
+        local enemy = living[key]
+        local a = attention[key]
+        if enemy == nil then
+            -- dead or gone: let go (a dead enemy's parts are not touched again)
+            if a ~= nil then let_go(a) end
+            attention[key] = nil
+        else
+            if a == nil or (a.look == false and state.frame - a.looked_up > LOOK_RETRY_FRAMES) then
+                a = { look = look_handle(enemy), looked_up = state.frame }
+                attention[key] = a
+            end
+            if a.look then
+                if pcall(function() a.look.set:call(a.look.comp, target) end) then
+                    looking = looking + 1
+                else
+                    a.look = false
+                end
+            end
+        end
+    end
+    debug.attention = string.format("%d enemies fighting Minecraft mobs, %d looking at them", count, looking)
+end
+
 local function shoot_enemy(damage, note)
     local hp, count = find_ranged_target()
     if hp == nil then
@@ -806,6 +920,12 @@ end
 -- Minecraft calculated an attack (cooldown, weapon, crits); apply it when a new one shows up
 local function update_minecraft_combat()
     update_enemy_damage()
+    local control = MinecraftRE4Control
+    if type(control) == "table" and control.mode == "re4" then
+        release_attention()   -- cutscenes, grabs, menus: RE4's own scenes decide where enemies look
+    else
+        update_enemy_attention()
+    end
 
     -- Melee: a new attack calculated by Minecraft (the first one seen is from before we started)
     local attack = bridge.attack
@@ -993,9 +1113,10 @@ re.on_pre_application_entry("UpdatePhysicsCharacterController", function()
             set_vertical(player, nil)
             debug.movement = "off"
         end
-        if settings.combat then update_minecraft_combat() end
+        if settings.combat then update_minecraft_combat() else release_attention() end
         return
     end
+    release_attention()
 
     debug.mode = "built-in (Minecraft not connected)"
     if menu_open() then return end
@@ -1030,6 +1151,7 @@ re.on_draw_ui(function()
         local changed
         changed, settings.movement = imgui.checkbox("Minecraft movement", settings.movement)
         changed, settings.combat = imgui.checkbox("Melee combat (left-click)", settings.combat)
+        changed, settings.enemies_look_at_mobs = imgui.checkbox("Enemies look at the Minecraft mobs fighting them", settings.enemies_look_at_mobs)
         changed, settings.no_damage = imgui.checkbox("No damage", settings.no_damage)
         changed, settings.swap_left_right = imgui.checkbox("Swap left/right (if A and D are backwards)", settings.swap_left_right)
         changed, settings.fly_speed = imgui.slider_float("Fly speed without Minecraft (m/s)", settings.fly_speed, 2.0, 40.0)
@@ -1043,6 +1165,7 @@ re.on_draw_ui(function()
             imgui.text("Movement: " .. debug.movement)
             imgui.text("Ground: " .. debug.ground)
             imgui.text("Combat: " .. debug.combat)
+            imgui.text("Mob fights: " .. debug.attention)
             imgui.text("Held item: " .. tostring(held_item_id()))
             imgui.text("Health: " .. debug.damage)
         end
@@ -1051,6 +1174,7 @@ re.on_draw_ui(function()
 end)
 
 re.on_script_reset(function()
+    release_attention()   -- let go of every enemy's look
     local player = get_player()
     if player == nil then return end
     if player.controller ~= nil then try_call(player.controller, "set_Enabled", true) end
