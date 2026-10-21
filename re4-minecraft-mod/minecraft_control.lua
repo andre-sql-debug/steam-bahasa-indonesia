@@ -63,8 +63,16 @@ local control = {
     minecraft_screen = false,   -- a Minecraft screen is open (set by minecraft_bridge_hud.lua)
     frame = 0,
     flags = {},           -- flag name -> true, for the debug panel
+    -- Every change of who has Leon, with the time and where Leon was (in the diagnostics report: a
+    -- playthrough shows each handover, and what kept RE4 in charge for long)
+    timeline = {},
 }
 MinecraftRE4Control = control
+
+local MAX_TIMELINE = 600
+local LONG_TURN_SECONDS = 60   -- RE4 in charge this long for something that isn't a cutscene is worth a note
+local started_at = os.time()   -- (wall clock: os.clock counts the CPU time of all of RE4's threads)
+local turn_started = started_at
 
 local keys_was = {}
 local calm = 0
@@ -175,6 +183,21 @@ re.on_pre_application_entry("UpdateBehavior", function()
         if calm < settings.calm_frames then return end
     end
     calm = 0
+    if mode ~= control.mode or reason ~= control.reason then
+        local now = os.time()
+        local held = now - turn_started
+        local entry = string.format("%6ds %-9s %s", now - started_at, mode, reason)
+        if pos ~= nil then entry = entry .. string.format("  at (%.1f, %.1f, %.1f)", pos.x, pos.y, pos.z) end
+        -- the turn that just ended was long, and not a cutscene, talk, menu or loading: note it
+        if control.mode == "re4" and held > LONG_TURN_SECONDS and control.reason ~= "get_IsEventLocked"
+                and control.reason ~= "get_IsTalkActing" and control.reason ~= "menu" and control.reason ~= "F7"
+                and control.reason ~= "no Leon (menu or loading)" then
+            entry = entry .. string.format("  (RE4 had Leon %.0f s for %s)", held, control.reason)
+        end
+        if #control.timeline >= MAX_TIMELINE then table.remove(control.timeline, 1) end
+        control.timeline[#control.timeline + 1] = entry
+        turn_started = now
+    end
     control.mode = mode
     control.reason = reason
 end)

@@ -1229,6 +1229,69 @@ re.on_script_reset(function()
     spawned = {}
 end)
 
+-- Which chapter and area the game is in (so Minecraft blocks can stay with the RE4 place they were built in):
+-- what RE4's managers say about chapters, areas, stages and maps, and the current scene's folders
+local PROGRESS_SINGLETONS = { "CampaignManager", "GameStatsManager", "MapManager", "LevelManager", "StageManager",
+    "SceneLoadManager", "GameFlowManager", "ChapterManager", "AreaManager", "FieldManager", "MainFlowManager",
+    "GameManager", "RoomManager", "WorldManager", "FlagManager", "SaveDataManager", "GameSaveManager", "MovieManager",
+    "TimelineEventManager", "LocationManager", "NavigationManager", "EnvironmentManager" }
+local PROGRESS_WORDS = { "chapter", "area", "stage", "map", "scene", "level", "room", "location", "progress", "episode",
+    "field", "loc", "chap" }
+
+local function game_progress()
+    local out = { managers = {} }
+    for _, short in ipairs(PROGRESS_SINGLETONS) do
+        local name = "chainsaw." .. short
+        local td = sdk.find_type_definition(name)
+        if td ~= nil then
+            local entry = { singleton = false, values = {} }
+            local obj = sdk.get_managed_singleton(name)
+            if obj ~= nil then
+                entry.singleton = true
+                local n_values = 0
+                for _, m in ipairs(td:get_methods() or {}) do
+                    local okn, n = pcall(function() return m:get_name() end)
+                    local l = okn and type(n) == "string" and n:lower() or ""
+                    local okp, np = pcall(function() return m:get_num_params() end)
+                    local wanted = false
+                    for _, w in ipairs(PROGRESS_WORDS) do if l:find(w, 1, true) then wanted = true end end
+                    if wanted and l:find("^get_") and okp and np == 0 and n_values < 60 then
+                        local okv, v = pcall(function() return obj:call(n) end)
+                        local value = "?"
+                        if okv then value = value_of(v, 1) end
+                        entry.values[n] = value
+                        n_values = n_values + 1
+                    end
+                end
+            end
+            out.managers[name] = entry
+        end
+    end
+    -- RE Engine scenes: the current one and its folders (RE4 loads an area as folders)
+    pcall(function()
+        local sm = sdk.get_native_singleton("via.SceneManager")
+        local smt = sdk.find_type_definition("via.SceneManager")
+        local scene = sm and sdk.call_native_func(sm, smt, "get_CurrentScene()")
+        if scene == nil then return end
+        out.scene = { name = tostring(try_call(scene, "get_Name")) }
+        local folders = {}
+        local folder = try_call(scene, "get_FirstFolder")
+        local guard = 0
+        while folder ~= nil and guard < 200 do
+            folders[#folders + 1] = string.format("%s%s", tostring(try_call(folder, "get_Name")),
+                try_call(folder, "get_Active") == false and " (off)" or "")
+            folder = try_call(folder, "get_Next")
+            guard = guard + 1
+        end
+        out.scene.folders = folders
+    end)
+    local ctx = player_context()
+    local body = ctx and try_call(ctx, "get_BodyGameObject")
+    local p = body and try_call(try_call(body, "get_Transform"), "get_Position")
+    out.leon = p and string.format("(%.2f, %.2f, %.2f)", p.x, p.y, p.z) or nil
+    return out
+end
+
 -- The main camera's components and their exposure/fog settings (to match Minecraft's brightness to RE4)
 local function camera_components()
     local out = {}
@@ -1283,6 +1346,8 @@ local KEYWORD_TYPES = {
     ["chainsaw.EnemyBaseContext"] = { "damage", "wince", "react", "hit", "stagger", "knock", "down", "stun", "attack" },
     ["chainsaw.collision.AttackUserData"] = { "attack", "damage", "wince", "break", "stopping", "data" },
     ["via.physics.Colliders"] = { "collider", "userdata", "num" },
+    ["via.Scene"] = { "folder", "name", "first", "child", "find" },
+    ["via.Folder"] = { "name", "next", "child", "active", "path", "first", "parent" },
     ["via.physics.Collider"] = { "userdata", "shape", "enable" },
 }
 
@@ -1369,6 +1434,8 @@ write_report = function()
         enemy_states_seen = states_seen,
         spawn_tests = spawn_results,
         camera_components = camera_components(),
+        game_progress = game_progress(),
+        control_timeline = type(c) == "table" and c.timeline or nil,
         flinch = type(MinecraftRE4Hit) == "table" and { method = MinecraftRE4Hit.method, status = MinecraftRE4Hit.status }
             or "minecraft_gameplay.lua not running",
         hit_and_reaction_types = type_dumps(),
