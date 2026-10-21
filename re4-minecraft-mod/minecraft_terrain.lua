@@ -54,7 +54,8 @@ local state = {
     authority = false,
     lost_frames = 0,
     leon_set = nil,          -- where we last put Leon
-    mc_prev = nil, mc_cur = nil, mc_frame = 0, mc_seq = nil,
+    mc_prev = nil, mc_cur = nil, mc_seq = nil, mc_arrival = nil, mc_interval = 0.05,
+    target_frame = -1, target = nil,   -- where Leon goes this frame (computed once, used by every placement)
     physics_off = false,
     released = false,        -- RE4 has Leon (see minecraft_control.lua)
     sync_seq = 0,
@@ -234,14 +235,19 @@ end
 
 local function update_scan(leon_pos)
     if state.center == nil or (leon_pos - state.center):length() > RECENTER_DISTANCE then
+        -- The cells already scanned stay valid: around the new center, everything within the old covered
+        -- radius minus the distance moved is still covered (resetting it to 0 made Minecraft hold the player
+        -- still until the scan caught up: getting stuck while walking)
+        local moved = state.center and (leon_pos - state.center):length() or math.huge
+        state.done_radius = math.max(0, state.done_radius - moved - settings.cell)
         state.center = Vector3f.new(leon_pos.x, leon_pos.y, leon_pos.z)
         state.cursor = 1
-        state.done_radius = 0
     end
     local a = state.anchor_re4
     local ci = math.floor((state.center.x - a.x) / settings.cell)
     local ck = math.floor((state.center.z - a.z) / settings.cell)
-    local budget = settings.cells_per_frame
+    -- Little ground known around Leon (just arrived, fast running): scan the near cells first and faster
+    local budget = settings.cells_per_frame * (state.done_radius < 5 and 3 or 1)
     local start = os.clock()
     local scanned = 0
     -- Look at each spiral entry at most once per frame; already fresh cells cost nothing
@@ -378,7 +384,7 @@ local function request_sync(pos, reason)
     state.sync_target = target
     state.sync_frames = 0
     state.authority = false
-    state.mc_prev, state.mc_cur, state.mc_seq = nil, nil, nil
+    state.mc_prev, state.mc_cur, state.mc_seq, state.mc_shown = nil, nil, nil, nil
     debug.status = "moving Minecraft's player to Leon (" .. reason .. ")"
 end
 
@@ -387,18 +393,42 @@ local function read_bridge()
     bridge = (ok and type(d) == "table" and d.in_world) and d or nil
 end
 
+-- Real time in seconds: the game's own clock (via.Application uptime), else os.clock
+local uptime_method = nil
+pcall(function() uptime_method = sdk.find_type_definition("via.Application"):get_method("get_UpTimeSecond") end)
+local function now_seconds()
+    local app = sdk.get_native_singleton("via.Application")
+    if uptime_method ~= nil and app ~= nil then
+        local ok, t = pcall(function() return uptime_method:call(app) end)
+        if ok and type(t) == "number" then return t end
+    end
+    return os.clock()
+end
+
 -- Minecraft's player position mapped into RE4, smoothed between Minecraft's 20 updates per second
 local function minecraft_leon_position()
     if bridge == nil or type(bridge.pos) ~= "table" or state.anchor_mc == nil then return nil end
     local p = bridge.pos
+    local now = now_seconds()
     if bridge.seq ~= state.mc_seq then
+        -- How often Minecraft's position arrives (20 times a second, give or take), smoothed
+        if state.mc_arrival ~= nil then
+            local gap = now - state.mc_arrival
+            if gap > 0.02 and gap < 0.2 then state.mc_interval = state.mc_interval * 0.8 + gap * 0.2 end
+        end
+        -- Count the glide from the previous frame, so this frame already moves on
+        state.mc_arrival = state.mc_last_now or now
         state.mc_seq = bridge.seq
-        state.mc_prev = state.mc_cur or Vector3f.new(p.x, p.y, p.z)
+        -- Glide on from where Leon is shown now (an early update must not make him jump)
+        state.mc_prev = state.mc_shown or state.mc_cur or Vector3f.new(p.x, p.y, p.z)
         state.mc_cur = Vector3f.new(p.x, p.y, p.z)
-        state.mc_frame = state.frame
     end
-    local t = math.min(1, (state.frame - state.mc_frame) / 3)
+    -- Glide from the previous position to the newest one over one update, by real time: smooth at any frame
+    -- rate (counting frames made Leon stop and go above 60 FPS)
+    local t = math.max(0, math.min(1, (now - (state.mc_arrival or now)) / state.mc_interval))
     local mc = state.mc_prev + (state.mc_cur - state.mc_prev) * t
+    state.mc_shown = mc
+    state.mc_last_now = now
     local a, m = state.anchor_re4, state.anchor_mc
     return Vector3f.new(a.x + (mc.x - m.x), a.y + (mc.y - m.y), a.z + (mc.z - m.z))
 end
@@ -459,7 +489,7 @@ re.on_pre_application_entry("UpdateBehavior", function()
         state.sync_frames = state.sync_frames + 1
         if bridge.sync_done == state.sync_seq then
             state.sync_target = nil
-            state.mc_prev, state.mc_cur, state.mc_seq = nil, nil, nil
+            state.mc_prev, state.mc_cur, state.mc_seq, state.mc_shown = nil, nil, nil, nil
         elseif state.sync_frames > SYNC_TIMEOUT_FRAMES then
             request_anchor("Minecraft didn't move its player")
             state.sync_target = nil
@@ -471,7 +501,7 @@ re.on_pre_application_entry("UpdateBehavior", function()
         state.epoch = state.request_epoch
         state.anchor_re4 = Vector3f.new(pos.x, pos.y, pos.z)
         state.anchor_mc = Vector3f.new(bridge.anchor.x, bridge.anchor.y, bridge.anchor.z)
-        state.mc_prev, state.mc_cur, state.mc_seq = nil, nil, nil
+        state.mc_prev, state.mc_cur, state.mc_seq, state.mc_shown = nil, nil, nil, nil
         build_spiral()
         debug.status = "anchored, scanning RE4's terrain"
     end
@@ -517,7 +547,18 @@ local function place_leon()
         return
     end
     local leon = get_leon()
-    local target = minecraft_leon_position()
+    -- One spot per frame for Leon and the camera (minecraft_first_person.lua reads it), so they never
+    -- disagree within a frame
+    if state.target_frame ~= state.frame then
+        state.target = minecraft_leon_position()
+        state.target_frame = state.frame
+        local c = MinecraftRE4Control
+        if type(c) == "table" then
+            c.leon_feet = state.target
+            c.leon_feet_frame = c.frame
+        end
+    end
+    local target = state.target
     if leon == nil or leon.transform == nil or target == nil then return end
     set_re4_physics(leon, false)
     try_call(leon.transform, "set_Position", target)

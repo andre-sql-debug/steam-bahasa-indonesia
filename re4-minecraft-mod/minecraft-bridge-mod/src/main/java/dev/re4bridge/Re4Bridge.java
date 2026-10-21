@@ -369,6 +369,9 @@ public class Re4Bridge implements ClientModInitializer {
         ticks++;
 
         try {
+            if (mc.player != null) {
+                scanNearbyBlocks(mc);
+            }
             if (mc.player != null && ticks % BLOCK_SCAN_EVERY_TICKS == 0) {
                 writeBlocks(mc);
             }
@@ -782,6 +785,8 @@ public class Re4Bridge implements ClientModInitializer {
         state.addProperty("overlay", overlayActive);
         // A Minecraft screen is open (inventory, creative menu, chat): RE4's scripts stop looking and moving
         state.addProperty("screen_open", overlayActive && !re4Turn && mc.screen != null);
+        // Minecraft draws the blocks you built into RE4 itself (minecraft_blocks.lua then draws nothing)
+        state.addProperty("blocks_in_overlay", overlayActive && !re4Turn);
         // Mouse settings, so RE4's mouse look turns exactly like Minecraft's
         state.addProperty("sensitivity", mc.options.sensitivity().get());
         state.addProperty("invert_mouse", mc.options.invertYMouse().get());
@@ -925,12 +930,47 @@ public class Re4Bridge implements ClientModInitializer {
     // Blocks around the player (only above the flat ground, i.e. what you built)
     // ---------------------------------------------------------------------------------------------
 
+    // Lowest block height to look at: around the player on RE4's terrain (it stands far above Minecraft's
+    // own ground there), from the flat ground up otherwise
+    private static int scanMinY(LocalPlayer player) {
+        if (Re4Terrain.enforced() || Double.isNaN(flatY)) {
+            return player.getBlockY() - 6;
+        }
+        return (int) Math.floor(flatY);
+    }
+
+    // Blocks near the player, every tick, for drawing them into RE4 with Minecraft's own block models
+    private static volatile List<BlockPos> nearbyBlocks = List.of();
+
+    public static List<BlockPos> nearbyBlocks() {
+        return nearbyBlocks;
+    }
+
+    private static void scanNearbyBlocks(Minecraft mc) {
+        LocalPlayer player = mc.player;
+        int minY = scanMinY(player);
+        BlockPos center = player.blockPosition();
+        List<BlockPos> found = new java.util.ArrayList<>();
+        BlockPos.MutableBlockPos p = new BlockPos.MutableBlockPos();
+        for (int x = -BLOCK_SCAN_RADIUS; x <= BLOCK_SCAN_RADIUS; x++) {
+            for (int z = -BLOCK_SCAN_RADIUS; z <= BLOCK_SCAN_RADIUS; z++) {
+                for (int y = minY; y <= minY + BLOCK_SCAN_HEIGHT; y++) {
+                    p.set(center.getX() + x, y, center.getZ() + z);
+                    if (!player.level().getBlockState(p).isAir()) {
+                        found.add(p.immutable());
+                    }
+                }
+            }
+        }
+        nearbyBlocks = found;
+    }
+
     private static void writeBlocks(Minecraft mc) throws IOException {
         LocalPlayer player = mc.player;
-        if (player == null || Double.isNaN(flatY)) {
+        if (player == null) {
             return;
         }
-        int minY = (int) Math.floor(flatY);
+        int minY = scanMinY(player);
         BlockPos center = player.blockPosition();
         JsonObject blocks = new JsonObject();
         JsonObject colors = new JsonObject();

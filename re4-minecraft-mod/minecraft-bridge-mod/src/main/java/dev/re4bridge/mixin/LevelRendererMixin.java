@@ -15,7 +15,12 @@ import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.client.renderer.LightTexture;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderBuffers;
+import net.minecraft.client.renderer.block.BlockRenderDispatcher;
 import net.minecraft.client.renderer.entity.EntityRenderDispatcher;
+import net.minecraft.client.renderer.texture.OverlayTexture;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.block.RenderShape;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.phys.Vec3;
@@ -30,7 +35,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 // While Minecraft's picture is shown over RE4, skip the Minecraft world (sky, terrain, blocks): only
-// Minecraft's mobs, dropped items, arrows and particles, the hand, held item and HUD are drawn, on a see-through
+// Minecraft's blocks you built, mobs, dropped items, arrows and particles, the hand, held item and HUD are drawn, on a see-through
 // background. In third person (F5) the player's own model is drawn too, so RE4 shows the Minecraft
 // character instead of Leon. The stand-ins of RE4's enemies are not drawn (RE4 shows the real enemy).
 @Mixin(LevelRenderer.class)
@@ -86,6 +91,22 @@ public class LevelRendererMixin {
             double z = Mth.lerp(partialTick, entity.zOld, entity.getZ()) - cam.z;
             float yaw = Mth.lerp(partialTick, entity.yRotO, entity.getYRot());
             this.entityRenderDispatcher.render(entity, x, y, z, yaw, partialTick, poseStack, buffers, LightTexture.FULL_BRIGHT);
+        }
+        // The blocks you built (TNT, glass, chests...), with Minecraft's own models and textures
+        BlockRenderDispatcher blockRenderer = Minecraft.getInstance().getBlockRenderer();
+        for (BlockPos pos : Re4Bridge.nearbyBlocks()) {
+            BlockState state = this.level.getBlockState(pos);
+            if (state.isAir() || state.getRenderShape() == RenderShape.INVISIBLE || pos.distToCenterSqr(cam) > RENDER_DISTANCE_SQR) {
+                continue;
+            }
+            poseStack.pushPose();
+            poseStack.translate(pos.getX() - cam.x, pos.getY() - cam.y, pos.getZ() - cam.z);
+            try {
+                blockRenderer.renderSingleBlock(state, poseStack, buffers, LightTexture.FULL_BRIGHT, OverlayTexture.NO_OVERLAY);
+            } catch (RuntimeException e) {
+                // a block model that can't be drawn on its own: skip it
+            }
+            poseStack.popPose();
         }
         buffers.endBatch();
         // Particles: crits, arrow trails, sweeps, potion swirls

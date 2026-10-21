@@ -440,7 +440,10 @@ local function update_camera(stage)
     if settings.minecraft_camera then
         -- Minecraft camera: steady eye height above Leon's feet, turned only by the mouse
         if eye == nil then update_look(cam_transform) end
-        local feet = transform and try_call(transform, "get_Position")
+        -- Where the terrain script puts Leon this frame (same spot it uses), else where he is
+        local c = MinecraftRE4Control
+        local feet = (type(c) == "table" and c.leon_feet ~= nil and c.leon_feet_frame == c.frame) and c.leon_feet
+            or (transform and try_call(transform, "get_Position"))
         if feet == nil then
             debug.camera = "could not read Leon's position"
             return

@@ -27,7 +27,8 @@ closes Minecraft's screen (not RE4's pause menu). While a Minecraft screen is op
 go to Minecraft. TNT works: place it on RE4's ground, light it with flint and steel, and the blast hurts
 RE4's enemies.
 
-**Minecraft in RE4**: spawn eggs and blocks work on RE4's ground; Minecraft's mobs, dropped items,
+**Minecraft in RE4**: spawn eggs and blocks work on RE4's ground, and the blocks you build are drawn by
+Minecraft itself into RE4 (real models and textures: TNT, glass, chests...); Minecraft's mobs, dropped items,
 arrows and particles are drawn into RE4. Each RE4 enemy near Leon has an (unseen) Minecraft stand-in,
 so iron golems, tamed wolves, TNT and your sword fight RE4's enemies with Minecraft's own attacks (sounds,
 crit sparks, damage hearts, knockback, enchantments); the damage is applied to the real enemy, and a killing

@@ -246,6 +246,22 @@ end
 
 ------------------------------------------------------------------------------
 
+-- The overlay plugin is drawing (it writes a heartbeat into minecraft_overlay_plugin.json)
+local plugin_beat, plugin_beat_frame, plugin_ready = nil, -100000, false
+local function overlay_plugin_alive()
+    if frame % 30 == 0 then
+        local ok, p = pcall(json.load_file, "minecraft_overlay_plugin.json")
+        if ok and type(p) == "table" then
+            if p.beat ~= plugin_beat then
+                plugin_beat = p.beat
+                plugin_beat_frame = frame
+            end
+            plugin_ready = p.ready == true
+        end
+    end
+    return plugin_ready and frame - plugin_beat_frame < 240
+end
+
 re.on_frame(function()
     frame = frame + 1
     read_bridge()
@@ -287,6 +303,15 @@ re.on_frame(function()
 
     if frame % SYNC_EVERY_FRAMES == 0 and not reanchor and not terrain_mode then write_sync(leon) end
     load_blocks()
+
+    -- With the overlay plugin running, Minecraft draws your blocks itself (real models and textures);
+    -- these flat cubes are only the fallback. The target outline is still drawn here.
+    if bridge.blocks_in_overlay == true and overlay_plugin_alive() then
+        debug.faces = 0
+        debug.status = "Minecraft draws the blocks"
+        draw_target()
+        return
+    end
 
     local cam = camera_position()
     if cam == nil then return end
