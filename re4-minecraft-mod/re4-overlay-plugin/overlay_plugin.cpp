@@ -1,4 +1,7 @@
 // RE4 Minecraft overlay: an REFramework plugin that draws Minecraft's live UI over RE4.
+// It also reads the raw mouse (movement and buttons) and writes it to
+// reframework\data\minecraft_mouse.json every frame, so the Lua scripts can do Minecraft-style
+// mouse look without RE4's own camera behavior.
 //
 // The RE4 Bridge Minecraft mod renders only its hand, held item and HUD on a see-through
 // background and writes every frame into reframework\data\minecraft_overlay.bin. This plugin
@@ -570,6 +573,47 @@ Renderer g_renderer;
 
 uint64_t g_present_count = 0;
 
+// Raw mouse input, totals since start (the Lua script uses the difference between reads)
+volatile LONG64 g_mouse_x = 0;
+volatile LONG64 g_mouse_y = 0;
+volatile LONG64 g_left_presses = 0;
+volatile LONG64 g_right_presses = 0;
+volatile LONG g_left_down = 0;
+volatile LONG g_right_down = 0;
+
+bool on_message(void* hwnd, unsigned int msg, unsigned long long wparam, long long lparam) {
+    if (msg == WM_INPUT) {
+        RAWINPUT raw{};
+        UINT size = sizeof(raw);
+        if (GetRawInputData((HRAWINPUT)lparam, RID_INPUT, &raw, &size, sizeof(RAWINPUTHEADER)) != (UINT)-1 &&
+            raw.header.dwType == RIM_TYPEMOUSE) {
+            const RAWMOUSE& m = raw.data.mouse;
+            if ((m.usFlags & MOUSE_MOVE_ABSOLUTE) == 0) {
+                InterlockedAdd64(&g_mouse_x, m.lLastX);
+                InterlockedAdd64(&g_mouse_y, m.lLastY);
+            }
+            if (m.usButtonFlags & RI_MOUSE_LEFT_BUTTON_DOWN) { InterlockedIncrement64(&g_left_presses); InterlockedExchange(&g_left_down, 1); }
+            if (m.usButtonFlags & RI_MOUSE_LEFT_BUTTON_UP) InterlockedExchange(&g_left_down, 0);
+            if (m.usButtonFlags & RI_MOUSE_RIGHT_BUTTON_DOWN) { InterlockedIncrement64(&g_right_presses); InterlockedExchange(&g_right_down, 1); }
+            if (m.usButtonFlags & RI_MOUSE_RIGHT_BUTTON_UP) InterlockedExchange(&g_right_down, 0);
+        }
+    }
+    return true;   // the game still gets every message
+}
+
+void write_mouse() {
+    static std::wstring path = data_folder() + L"minecraft_mouse.json";
+    static std::wstring tmp = data_folder() + L"minecraft_mouse.json.tmp";
+    FILE* f = _wfopen(tmp.c_str(), L"wb");
+    if (f == nullptr) return;
+    fprintf(f, "{\"frame\":%llu,\"x\":%lld,\"y\":%lld,\"left_presses\":%lld,\"right_presses\":%lld,\"left\":%s,\"right\":%s}",
+            (unsigned long long)g_present_count, (long long)g_mouse_x, (long long)g_mouse_y,
+            (long long)g_left_presses, (long long)g_right_presses,
+            g_left_down ? "true" : "false", g_right_down ? "true" : "false");
+    fclose(f);
+    MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
+}
+
 void write_status() {
     std::wstring path = data_folder() + L"minecraft_overlay_plugin.json";
     FILE* f = _wfopen(path.c_str(), L"wb");
@@ -582,6 +626,7 @@ void write_status() {
 void on_present() {
     ++g_present_count;
     g_renderer.frame();
+    write_mouse();
     if (g_present_count % 60 == 1) write_status();
 }
 
@@ -605,6 +650,7 @@ extern "C" __declspec(dllexport) bool reframework_plugin_initialize(const REFram
     g_param = param;
     param->functions->on_present(on_present);
     param->functions->on_device_reset(on_device_reset);
+    param->functions->on_message((REFOnMessageCb)on_message);
     log_info("loaded");
     return true;
 }

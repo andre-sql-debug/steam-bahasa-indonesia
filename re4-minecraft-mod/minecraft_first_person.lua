@@ -1,14 +1,20 @@
 -- Minecraft First Person for RE4 Remake (REFramework Lua script)
--- Moves the camera into Leon's head and draws Minecraft's "+" crosshair.
+-- Minecraft's first-person camera for Leon: a steady eye height above his feet (1.62 m, 1.27 m when
+-- sneaking), turned only by the mouse with Minecraft's sensitivity formula (needs the overlay plugin,
+-- which reads the raw mouse; without it RE4's own camera rotation is used). Also draws a "+" crosshair
+-- when Minecraft isn't drawing its own.
 -- Press F5 to switch between first person and the normal RE4 camera.
 -- Install: copy this file to <RE4 folder>\reframework\autorun\
 -- Settings: press Insert -> Script Generated UI -> Minecraft First Person
 
 local settings = {
     first_person = true,
-    forward_offset = 0.10,  -- meters in front of the head joint
-    up_offset = 0.05,
-    hide_head = false,      -- experimental, see set_head_hidden
+    minecraft_camera = true,   -- eye height above the feet + mouse look; off = follow the head bone
+    eye_height = 1.62,         -- Minecraft's eye height in blocks (= meters)
+    sneak_eye_height = 1.27,
+    forward_offset = 0.10,  -- meters in front of the eye/head position
+    up_offset = 0.05,       -- only for the head bone camera
+    hide_head = true,       -- switches off Leon's head/hair/face meshes (never shrinks bones)
     crosshair = true,
     stage = 1,              -- index into STAGES
     show_debug = false,
@@ -31,6 +37,7 @@ local debug = {
     last_stage = "none",
     joints = "",
     parts = "",
+    look = "not started",
 }
 
 local head_joint = nil
@@ -197,6 +204,88 @@ local function update_toggle_key()
     f5_was_down = down
 end
 
+------------------------------------------------------------------------------
+-- Minecraft mouse look (raw mouse from the overlay plugin) and eye height
+------------------------------------------------------------------------------
+
+local MOUSE_FILE = "minecraft_mouse.json"
+local mouse = { x = nil, y = nil, frame = nil, alive_until = -1 }
+local look = { yaw = nil, pitch = nil }   -- radians; yaw 0 = looking down -Z, pitch > 0 = looking up
+local frame_counter = 0
+local eye = nil
+local bridge_settings = { sensitivity = 0.5, invert = false, sneaking = false }
+
+local function key_is_down(key)
+    local ok, down = pcall(function() return reframework:is_key_down(key) end)
+    return ok and down == true
+end
+
+-- Degrees per mouse count, exactly like Minecraft: (sensitivity * 0.6 + 0.2)^3 * 8 * 0.15
+local function degrees_per_count()
+    local f = bridge_settings.sensitivity * 0.6 + 0.2
+    return f * f * f * 8 * 0.15
+end
+
+local function read_mouse()
+    local ok, m = pcall(json.load_file, MOUSE_FILE)
+    if not ok or type(m) ~= "table" or m.frame == nil then return 0, 0 end
+    if m.frame == mouse.frame then return 0, 0 end
+    mouse.frame = m.frame
+    mouse.alive_until = frame_counter + 30
+    if mouse.x == nil then
+        mouse.x, mouse.y = m.x, m.y
+        return 0, 0
+    end
+    local dx, dy = m.x - mouse.x, m.y - mouse.y
+    mouse.x, mouse.y = m.x, m.y
+    return dx, dy
+end
+
+local function look_from_rotation(rot)
+    local ok, f = pcall(function() return rot * Vector3f.new(0, 0, -1) end)
+    if not ok or f == nil then return end
+    look.yaw = math.atan(-f.x, -f.z)
+    look.pitch = math.asin(math.max(-1, math.min(1, f.y)))
+end
+
+local function rotation_from_look()
+    local ok, q = pcall(function()
+        local y, p = look.yaw * 0.5, look.pitch * 0.5
+        return Quaternion.new(math.cos(y), 0, math.sin(y), 0) * Quaternion.new(math.cos(p), math.sin(p), 0, 0)
+    end)
+    if ok then return q end
+    return nil
+end
+
+-- Once per frame: turn by the mouse, ease the eye height between standing and sneaking
+local function update_look(cam_transform)
+    frame_counter = frame_counter + 1
+    if frame_counter % 30 == 0 then
+        local ok, b = pcall(json.load_file, "minecraft_bridge.json")
+        if ok and type(b) == "table" then
+            if type(b.sensitivity) == "number" then bridge_settings.sensitivity = b.sensitivity end
+            bridge_settings.invert = b.invert_mouse == true
+        end
+    end
+
+    local dx, dy = read_mouse()
+    local rot = try_call(cam_transform, "get_Rotation")
+    if look.yaw == nil or frame_counter > mouse.alive_until then
+        -- No raw mouse (plugin missing) or just started: follow RE4's camera
+        if rot ~= nil then look_from_rotation(rot) end
+        debug.look = "RE4 camera rotation (no raw mouse)"
+    else
+        if bridge_settings.invert then dy = -dy end
+        local k = math.rad(degrees_per_count())
+        look.yaw = look.yaw - dx * k
+        look.pitch = math.max(math.rad(-90), math.min(math.rad(90), look.pitch - dy * k))
+        debug.look = string.format("Minecraft mouse look (%.3f deg/count)", degrees_per_count())
+    end
+
+    local target = key_is_down(0x10) and settings.sneak_eye_height or settings.eye_height
+    eye = eye and (eye + (target - eye) * 0.35) or target
+end
+
 local function update_camera(stage)
     local joint, transform = get_head_joint()
     if joint == nil then return end
@@ -218,19 +307,35 @@ local function update_camera(stage)
         return
     end
 
-    local pos = try_call(joint, "get_Position")
-    if pos == nil then
-        debug.camera = "could not read head position"
-        return
-    end
-
-    -- Keep the game's camera rotation (mouse look), only move the camera into the head
-    local new_pos = pos + Vector3f.new(0, settings.up_offset, 0)
-    local rot = try_call(cam_transform, "get_Rotation")
-    if rot ~= nil then
-        local ok, forward = pcall(function() return rot * Vector3f.new(0, 0, -1) end)
-        if ok and forward ~= nil then
-            new_pos = new_pos + forward * settings.forward_offset
+    local new_pos
+    local rot
+    if settings.minecraft_camera then
+        -- Minecraft camera: steady eye height above Leon's feet, turned only by the mouse
+        if eye == nil then update_look(cam_transform) end
+        local feet = transform and try_call(transform, "get_Position")
+        if feet == nil then
+            debug.camera = "could not read Leon's position"
+            return
+        end
+        rot = rotation_from_look()
+        if rot ~= nil then try_call(cam_transform, "set_Rotation", rot) end
+        local yaw = look.yaw or 0
+        local flat_forward = Vector3f.new(-math.sin(yaw), 0, -math.cos(yaw))
+        new_pos = feet + Vector3f.new(0, eye, 0) + flat_forward * settings.forward_offset
+    else
+        local pos = try_call(joint, "get_Position")
+        if pos == nil then
+            debug.camera = "could not read head position"
+            return
+        end
+        -- Keep the game's camera rotation, only move the camera into the head
+        new_pos = pos + Vector3f.new(0, settings.up_offset, 0)
+        rot = try_call(cam_transform, "get_Rotation")
+        if rot ~= nil then
+            local ok, forward = pcall(function() return rot * Vector3f.new(0, 0, -1) end)
+            if ok and forward ~= nil then
+                new_pos = new_pos + forward * settings.forward_offset
+            end
         end
     end
 
@@ -240,6 +345,18 @@ local function update_camera(stage)
 end
 
 re.on_pre_application_entry("UpdateBehavior", update_toggle_key)
+
+-- Mouse look and eye height advance once per frame, whichever camera timing is selected
+re.on_application_entry("LateUpdateBehavior", function()
+    if not (settings.first_person and settings.minecraft_camera) then
+        look.yaw = nil
+        return
+    end
+    local camera = sdk.get_primary_camera()
+    local cam_obj = camera and try_call(camera, "get_GameObject")
+    local cam_transform = cam_obj and try_call(cam_obj, "get_Transform")
+    if cam_transform ~= nil then update_look(cam_transform) end
+end)
 re.on_application_entry("LateUpdateBehavior", function() update_camera("LateUpdateBehavior") end)
 re.on_pre_application_entry("PrepareRendering", function() update_camera("PrepareRendering") end)
 re.on_pre_application_entry("BeforeLockSceneRendering", function() update_camera("BeforeLockSceneRendering") end)
@@ -294,6 +411,8 @@ re.on_draw_ui(function()
     if imgui.tree_node("Minecraft First Person") then
         local changed
         changed, settings.first_person = imgui.checkbox("First person (F5)", settings.first_person)
+        changed, settings.minecraft_camera = imgui.checkbox("Minecraft camera (eye height + mouse look)", settings.minecraft_camera)
+        changed, settings.eye_height = imgui.slider_float("Eye height", settings.eye_height, 1.2, 2.0)
         changed, settings.hide_head = imgui.checkbox("Hide Leon's head", settings.hide_head)
         changed, settings.crosshair = imgui.checkbox("Crosshair", settings.crosshair)
         changed, settings.forward_offset = imgui.slider_float("Forward offset", settings.forward_offset, -0.5, 0.5)
@@ -304,6 +423,7 @@ re.on_draw_ui(function()
             imgui.text("Player: " .. debug.player)
             imgui.text("Head: " .. debug.head)
             imgui.text("Camera: " .. debug.camera)
+            imgui.text("Look: " .. debug.look)
             imgui.text("Last timing used: " .. debug.last_stage)
             if imgui.button("List joints") then list_joints() end
             imgui.same_line()

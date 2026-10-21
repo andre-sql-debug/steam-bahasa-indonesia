@@ -38,7 +38,10 @@ Copy the `.lua` files into `<RE4 game folder>\reframework\autorun\`. Settings: p
   The HUD is drawn from Minecraft's own images (hotbar, hearts, hunger, armor, XP bar) and font, and item
   icons are the real Minecraft textures, all sent by the Minecraft mod. RE4's own UI is hidden while
   Leon is in the game (**F8** shows it again).
-- `minecraft_first_person.lua`: first-person camera (toggle with **F5**) and Minecraft's `+` crosshair.
+- `minecraft_first_person.lua`: Minecraft's first-person camera (toggle with **F5**): a steady eye height above
+  Leon's feet (1.62 m, 1.27 m sneaking), turned only by the raw mouse (read by the overlay plugin) with
+  Minecraft's sensitivity formula and your Minecraft sensitivity setting. Draws a `+` crosshair only when
+  Minecraft isn't drawing its own.
 - `minecraft_gameplay.lua`: copies the Minecraft player's movement (walking, sprinting, sneaking, jumping,
   Creative flying) to Leon and applies Minecraft's attack damage (cooldown, crits) to the enemy in front of
   you. Without Minecraft it falls back to built-in Minecraft movement numbers. Also: no damage for Leon.
@@ -52,7 +55,7 @@ Copy the `.lua` files into `<RE4 game folder>\reframework\autorun\`. Settings: p
 A client-only Fabric mod for Minecraft Java **1.21.1**.
 
 1. Install a Java 21 JDK (e.g. Eclipse Temurin 21).
-2. Build: in `minecraft-bridge-mod`, run `gradlew.bat build` (Windows). The mod is `build\libs\re4bridge-0.5.0.jar`.
+2. Build: in `minecraft-bridge-mod`, run `gradlew.bat build` (Windows). The mod is `build\libs\re4bridge-0.5.1.jar`.
 3. Install Fabric Loader for 1.21.1 (Fabric installer, or a Fabric 1.21.1 profile in the CurseForge/Modrinth app)
    and put the jar in that profile's `mods` folder.
 4. Start Minecraft once. `config\re4bridge.txt` holds the path of the file it writes; change it if RE4 is

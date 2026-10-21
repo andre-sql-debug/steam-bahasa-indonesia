@@ -517,6 +517,9 @@ public class Re4Bridge implements ClientModInitializer {
         state.addProperty("game_mode", mc.gameMode != null ? mc.gameMode.getPlayerMode().getName() : "unknown");
         state.addProperty("re4_control", remoteKeys() != null);
         state.addProperty("overlay", overlayActive);
+        // Mouse settings, so RE4's mouse look turns exactly like Minecraft's
+        state.addProperty("sensitivity", mc.options.sensitivity().get());
+        state.addProperty("invert_mouse", mc.options.invertYMouse().get());
         state.addProperty("blocks_version", blocksVersion);
         state.addProperty("textures_version", texturesVersion);
 
@@ -587,6 +590,9 @@ public class Re4Bridge implements ClientModInitializer {
         JsonObject move = new JsonObject();
         move.addProperty("forward", forward);
         move.addProperty("right", right);
+        // The same movement in world directions; RE4 uses these directly (its look direction is Minecraft's)
+        move.addProperty("dx", dx);
+        move.addProperty("dz", dz);
         move.addProperty("up", dy);
         move.addProperty("elevation", Double.isNaN(flatY) ? 0.0 : Math.max(0.0, player.getY() - flatY));
         move.addProperty("on_ground", player.onGround());

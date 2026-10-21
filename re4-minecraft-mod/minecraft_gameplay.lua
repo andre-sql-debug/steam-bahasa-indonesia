@@ -227,8 +227,37 @@ local function is_on_ground(player)
     return state.vy == nil
 end
 
--- Horizontal camera directions (so W walks where you look), the full look direction and the camera
+-- The look direction the HUD script last sent to Minecraft (the first-person mouse look), in
+-- Minecraft angles: yaw 0 = +Z, pitch > 0 = looking down
+local sent_look = { yaw = nil, pitch = nil, frame = -1 }
+local look_frame = 0
+
+local function read_sent_look()
+    look_frame = look_frame + 1
+    local ok, input = pcall(json.load_file, "minecraft_bridge_input.json")
+    if ok and type(input) == "table" and type(input.yaw) == "number" and type(input.pitch) == "number" then
+        sent_look.yaw, sent_look.pitch, sent_look.frame = input.yaw, input.pitch, look_frame
+    end
+end
+
+local function leon_eye_position()
+    local player = get_player()
+    local feet = player and player.transform and try_call(player.transform, "get_Position")
+    if feet == nil then return nil end
+    return feet + Vector3f.new(0, 1.62, 0)
+end
+
+-- Horizontal directions (so W walks where you look), the full look direction and the eye position.
+-- Uses the look direction sent to Minecraft; RE4's camera only as a fallback.
 local function camera_vectors()
+    if sent_look.yaw ~= nil and look_frame - sent_look.frame < 30 then
+        local yaw, pitch = math.rad(sent_look.yaw), math.rad(sent_look.pitch)
+        local forward = Vector3f.new(-math.sin(yaw), 0, math.cos(yaw))
+        local right = Vector3f.new(-forward.z, 0, forward.x)
+        if settings.swap_left_right then right = right * -1 end
+        local look = Vector3f.new(-math.sin(yaw) * math.cos(pitch), -math.sin(pitch), math.cos(yaw) * math.cos(pitch))
+        return forward, right, look, nil, leon_eye_position()
+    end
     local camera = sdk.get_primary_camera()
     local cam_obj = camera and try_call(camera, "get_GameObject")
     local cam_transform = cam_obj and try_call(cam_obj, "get_Transform")
@@ -241,7 +270,7 @@ local function camera_vectors()
     local forward = Vector3f.new(f.x / len, 0, f.z / len)
     local right = Vector3f.new(-forward.z, 0, forward.x)
     if settings.swap_left_right then right = right * -1 end
-    return forward, right, f, cam_transform
+    return forward, right, f, cam_transform, cam_transform and try_call(cam_transform, "get_Position")
 end
 
 -- gravity: RE4 pulls Leon down; check_ground: RE4 snaps Leon onto the ground
@@ -334,6 +363,10 @@ local function update_from_minecraft(player, dt)
     local predicting = not minecraft_caught_up(keys)
     if predicting then
         velocity = predicted_velocity(keys, forward, right, dt)
+    elseif move.dx ~= nil and move.dz ~= nil and not settings.swap_left_right then
+        -- Minecraft looks where Leon looks, so its world movement is Leon's movement
+        velocity = Vector3f.new(move.dx, 0, move.dz) * TICKS_PER_SECOND
+        state.velocity = velocity
     else
         velocity = (forward * (move.forward or 0) + right * (move.right or 0)) * TICKS_PER_SECOND
         state.velocity = velocity
@@ -499,8 +532,7 @@ end
 
 -- The HitPoint of the enemy closest to the crosshair within reach, and how many enemies are loaded
 local function find_target()
-    local _, _, look, cam_transform = camera_vectors()
-    local cam_pos = cam_transform and try_call(cam_transform, "get_Position")
+    local _, _, look, _, cam_pos = camera_vectors()
     if look == nil or cam_pos == nil then return nil, 0 end
 
     local cm = get_character_manager()
@@ -687,6 +719,7 @@ end)
 -- Right before RE4's collision check
 re.on_pre_application_entry("UpdatePhysicsCharacterController", function()
     read_bridge()
+    read_sent_look()
     local player = get_player()
     if player == nil then return end
     local dt = get_delta_time(player)

@@ -759,6 +759,35 @@ local function mouse_down()
     return false
 end
 
+-- Raw mouse buttons from the overlay plugin (counts every click, even between frames)
+local plugin_mouse = nil
+local plugin_mouse_frame = nil
+local plugin_mouse_alive_until = -1
+local last_presses = { left = nil, right = nil }
+
+local function read_plugin_mouse()
+    local ok, m = pcall(json.load_file, "minecraft_mouse.json")
+    if not ok or type(m) ~= "table" or m.frame == nil then return end
+    if m.frame ~= plugin_mouse_frame then
+        plugin_mouse_frame = m.frame
+        plugin_mouse_alive_until = frame + 30
+    end
+    plugin_mouse = m
+end
+
+local function plugin_mouse_alive()
+    return plugin_mouse ~= nil and frame <= plugin_mouse_alive_until
+end
+
+-- New presses since the last call (nil when the plugin isn't running)
+local function plugin_new_presses(button)
+    local total = plugin_mouse[button .. "_presses"] or 0
+    local last = last_presses[button]
+    last_presses[button] = total
+    if last == nil or total < last then return 0 end
+    return total - last
+end
+
 local function right_mouse_down()
     if key_down(0x02) then return true end
     local ok, down = pcall(imgui.is_mouse_down, 1)
@@ -819,9 +848,23 @@ local function update_input()
     end
 
     -- Left: attack / break (held = keep mining). Right: Minecraft's "use" (place blocks...)
-    local mouse = mouse_down()
-    if mouse and not mouse_was_down then
-        input.swings = input.swings + 1
+    read_plugin_mouse()
+    local mouse, new_left, new_right
+    local right
+    if plugin_mouse_alive() then
+        mouse_source = "overlay plugin (raw)"
+        mouse = plugin_mouse.left == true
+        right = plugin_mouse.right == true
+        new_left = plugin_new_presses("left")
+        new_right = plugin_new_presses("right")
+    else
+        mouse = mouse_down()
+        right = right_mouse_down()
+        new_left = (mouse and not mouse_was_down) and 1 or 0
+        new_right = (right and not right_was_down) and 1 or 0
+    end
+    if new_left > 0 then
+        input.swings = input.swings + new_left
         swing_frame = frame
         changed = true
     end
@@ -831,9 +874,8 @@ local function update_input()
     end
     mouse_was_down = mouse
 
-    local right = right_mouse_down()
-    if right and not right_was_down then
-        input.uses = input.uses + 1
+    if new_right > 0 then
+        input.uses = input.uses + new_right
         swing_frame = frame
         changed = true
     end
