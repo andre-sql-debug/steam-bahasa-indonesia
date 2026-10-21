@@ -31,6 +31,7 @@ local state = {
     pool = {},            -- export id -> list of hidden objects for reuse
     poses_seq = nil,
     poses_frame = 0,
+    session = nil,        -- the Minecraft session the loaded parts belong to (part numbers restart per session)
     quat_order = nil,     -- how Quaternion.new takes its numbers ("wxyz" or "xyzw")
     acked = {},           -- export ids with a working object
 }
@@ -67,9 +68,18 @@ local function load_holder(resource_type, holder_type, path)
     return holder
 end
 
+local destroy_all
+
 local function load_assets()
     local ok, data = pcall(json.load_file, ASSETS_FILE)
     if not ok or type(data) ~= "table" or type(data.exports) ~= "table" then return end
+    if data.session ~= state.session then
+        -- Minecraft restarted: its part numbers mean other parts now
+        destroy_all(true)
+        state.assets = {}
+        state.acked = {}
+        state.session = data.session
+    end
     for id, e in pairs(data.exports) do
         if state.assets[id] == nil and type(e) == "table" and type(e.mesh) == "string" and type(e.material) == "string" then
             local mesh, merr = load_holder("via.render.MeshResource", "via.render.MeshResourceHolder", e.mesh)
@@ -140,7 +150,7 @@ local function take_object(id)
     return o
 end
 
-local function destroy_all(touch)
+destroy_all = function(touch)
     for key, o in pairs(state.objects) do
         if touch then pcall(function() o.go:call("destroy(via.GameObject)", o.go) end) end
         state.objects[key] = nil
@@ -235,7 +245,8 @@ end
 
 local function read_poses()
     local ok, data = pcall(json.load_file, POSES_FILE)
-    if not ok or type(data) ~= "table" or data.seq == nil or data.seq == state.poses_seq then
+    if not ok or type(data) ~= "table" or data.seq == nil or data.seq == state.poses_seq
+            or data.session ~= state.session then
         if state.frame - state.poses_frame > STALE_FRAMES then hide_all() end
         return
     end
@@ -247,7 +258,7 @@ end
 local function write_status()
     local acked = {}
     for id in pairs(state.acked) do acked[#acked + 1] = tonumber(id) end
-    pcall(json.dump_file, STATUS_FILE, { enabled = settings.enabled, acked = acked, frame = state.frame })
+    pcall(json.dump_file, STATUS_FILE, { enabled = settings.enabled, acked = acked, frame = state.frame, session = state.session })
 end
 
 ------------------------------------------------------------------------------

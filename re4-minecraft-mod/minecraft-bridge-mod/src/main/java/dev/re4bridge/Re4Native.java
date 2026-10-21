@@ -80,6 +80,8 @@ public final class Re4Native {
     private static final Set<Integer> nativeEntities = new HashSet<>();
     private static long seq = 0;
     private static boolean sentEmpty = true;
+    // Part numbers start at 1 in every Minecraft session: RE4 only uses numbers of the session it loaded
+    private static final long SESSION = ProcessHandle.current().pid();
 
     // Written by the export thread
     private static final Map<Integer, Export> ready = new ConcurrentHashMap<>();
@@ -142,7 +144,8 @@ public final class Re4Native {
             }
             enabled = status.has("enabled") && status.get("enabled").getAsBoolean();
             Set<Integer> ids = new HashSet<>();
-            if (status.has("acked") && status.get("acked").isJsonArray()) {
+            boolean ours = status.has("session") && status.get("session").getAsLong() == SESSION;
+            if (ours && status.has("acked") && status.get("acked").isJsonArray()) {
                 for (JsonElement e : status.getAsJsonArray("acked")) {
                     ids.add(e.getAsInt());
                 }
@@ -392,13 +395,13 @@ public final class Re4Native {
             list.add(Integer.toString(e.id()), o);
         }
         root.add("exports", list);
-        root.addProperty("session", ProcessHandle.current().pid());
+        root.addProperty("session", SESSION);
         writeAtomically(assetsFile, root.toString().getBytes(StandardCharsets.UTF_8));
     }
 
     private static void writePoses(String parts) {
         try {
-            String json = "{\"seq\":" + (++seq) + ",\"parts\":\"" + parts + "\"}";
+            String json = "{\"seq\":" + (++seq) + ",\"session\":" + SESSION + ",\"parts\":\"" + parts + "\"}";
             writeAtomically(posesFile, json.getBytes(StandardCharsets.UTF_8));
         } catch (IOException e) {
             Re4Bridge.warnOnce("could not write the RE4 mob poses", e);
