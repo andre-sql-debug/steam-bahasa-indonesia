@@ -21,6 +21,7 @@ local settings = {
     movement = true,
     combat = true,
     enemies_look_at_mobs = true,
+    flinch = true,          -- enemies react to Minecraft hits (once the Flinch test found a way that works)
     no_damage = true,
     swap_left_right = false,
     fly_speed = 10.9,       -- m/s, only without Minecraft
@@ -747,13 +748,226 @@ local function find_ranged_target()
     return best_hp, count
 end
 
+------------------------------------------------------------------------------
+-- Minecraft hits as RE4 hits: the enemy reacts (flinches, staggers) through RE4's own hit code.
+-- A chainsaw.HitController.DamageInfo is filled like RE4 fills one for Leon's knife and handed to the enemy's
+-- HitController.callbackDamageHit. Which way of filling it works is found by the Flinch test in
+-- minecraft_diagnostics.lua (it calls this same code) and saved in reframework\data\minecraft_flinch.json:
+--   "template"    numbers and attack data copied from RE4's last real hit on an enemy (knife/kick/shot)
+--   "last_attack" the attack data of the last real attack that hit this enemy
+--   "fresh"       a new, default attack data
+------------------------------------------------------------------------------
+
+local FLINCH_FILE = "minecraft_flinch.json"
+local FLINCH_COOLDOWN_FRAMES = 30     -- one reaction per enemy at most every half second
+local FLINCH_WINCE, FLINCH_STOPPING = 100.0, 100.0   -- used when no real hit was seen to copy from
+
+local HIT = {
+    method = nil,            -- the way that works on this PC (from the Flinch test), or nil (not tested)
+    template = nil,          -- copy of RE4's last real hit on an enemy
+    building = false,        -- our own callbackDamageHit is running (not a real hit)
+    failures = 0,
+    last_flinch = {},        -- enemy body address -> frame
+    pool = {}, pool_next = 1,
+    status = "not tested yet (Minecraft Diagnostics -> Flinch test)",
+}
+MinecraftRE4Hit = HIT        -- shared with minecraft_diagnostics.lua
+
+do
+    local ok, saved = pcall(json.load_file, FLINCH_FILE)
+    if ok and type(saved) == "table" and saved.works == true and type(saved.method) == "string" then
+        HIT.method = saved.method
+        HIT.status = "on (" .. saved.method .. ", tested " .. tostring(saved.time or "?") .. ")"
+    end
+end
+
+local hit_controller_type = sdk.typeof("chainsaw.HitController")
+local colliders_type_name = "via.physics.Colliders"
+
+local function address_of(obj)
+    local ok, a = pcall(function() return obj:get_address() end)
+    return ok and a or nil
+end
+
+local function enemy_bodies()
+    local out = {}
+    local cm = get_character_manager()
+    local list = cm and try_call(cm, "get_EnemyContextList")
+    local count = list and try_call(list, "get_Count") or 0
+    for i = 0, count - 1 do
+        local enemy = try_call(list, "get_Item", i)
+        local body = enemy and try_call(enemy, "get_BodyGameObject")
+        local a = body and address_of(body)
+        if a ~= nil then out[a] = enemy end
+    end
+    return out
+end
+
+-- RE4's own hits on enemies: keep a copy of the last one (its numbers and attack data are the model for ours)
+pcall(function()
+    local td = sdk.find_type_definition("chainsaw.HitController")
+    local m = td and td:get_method("callbackDamageHit(chainsaw.HitController.DamageInfo)")
+    if m == nil then return end
+    sdk.hook(m, function(args)
+        if HIT.building then return end
+        pcall(function()
+            local hc = sdk.to_managed_object(args[2])
+            local info = sdk.to_managed_object(args[3])
+            local go = hc and try_call(hc, "get_GameObject")
+            local a = go and address_of(go)
+            if a == nil or info == nil or enemy_bodies()[a] == nil then return end
+            local copy = info:call("MemberwiseClone")
+            if copy ~= nil then
+                pcall(function() copy:add_ref() end)
+                HIT.template = copy
+            end
+        end)
+    end, function(retval) return retval end)
+end)
+
+-- A DamageInfo of our own, reused round-robin (RE4 may hold on to one for a moment)
+local function new_damage_info()
+    local slot = HIT.pool_next
+    HIT.pool_next = slot % 4 + 1
+    local info = HIT.pool[slot]
+    if info == nil then
+        info = sdk.create_instance("chainsaw.HitController.DamageInfo")
+        if info == nil then return nil end
+        pcall(function() info:add_ref() end)
+        info:call(".ctor")
+        HIT.pool[slot] = info
+    else
+        try_call(info, "clear")
+    end
+    return info
+end
+
+-- The enemy's damage colliders' data (which body part was hit): the first one found
+local function damage_user_data(body)
+    local comps = try_call(body, "get_Components")
+    local ok, elems = pcall(function() return comps:get_elements() end)
+    if not ok or elems == nil then return nil end
+    for _, comp in ipairs(elems) do
+        local okt, tn = pcall(function() return comp:get_type_definition():get_full_name() end)
+        if okt and tn == colliders_type_name then
+            local n = try_call(comp, "get_NumColliders") or 0
+            for i = 0, n - 1 do
+                local collider = try_call(comp, "getColliders", i)
+                local ud = collider and try_call(collider, "get_UserData")
+                local okn, un = pcall(function() return ud:get_type_definition():get_full_name() end)
+                if okn and un ~= nil and un:find("DamageUserData", 1, true) then return ud end
+            end
+        end
+    end
+    return nil
+end
+
+local function set(obj, method, value)
+    return pcall(function() obj:call(method, value) end)
+end
+
+-- Make this enemy react to a hit coming from from_pos, the way `method` fills the hit. Returns ok, message.
+function HIT.flinch(enemy, method, from_pos)
+    method = method or HIT.method
+    if method == nil then return false, "no working method known" end
+    local body = try_call(enemy, "get_BodyGameObject")
+    local hc = body and try_call(body, "getComponent(System.Type)", hit_controller_type)
+    local tr = body and try_call(body, "get_Transform")
+    local epos = tr and try_call(tr, "get_Position")
+    if hc == nil or epos == nil then return false, "enemy has no HitController" end
+    local leon = get_player()
+    local leon_body = leon and try_call(leon.ctx, "get_BodyGameObject")
+    from_pos = from_pos or (leon and leon.transform and try_call(leon.transform, "get_Position")) or epos
+    local hit_pos = Vector3f.new(epos.x, epos.y + 1.2, epos.z)
+    local dir = hit_pos - Vector3f.new(from_pos.x, from_pos.y + 1.2, from_pos.z)
+    local len = dir:length()
+    dir = len > 0.01 and Vector3f.new(dir.x / len, dir.y / len, dir.z / len) or Vector3f.new(0, 0, 1)
+
+    local attack, wince, stopping, brk = nil, FLINCH_WINCE, FLINCH_STOPPING, 0.0
+    if method == "template" then
+        local t = HIT.template
+        if t == nil then return false, "no real hit seen yet to copy" end
+        attack = try_call(t, "get_AttackData")
+        wince = try_call(t, "get_Wince") or wince
+        stopping = try_call(t, "get_Stopping") or stopping
+        brk = try_call(t, "get_Break") or brk
+    elseif method == "last_attack" then
+        attack = try_call(enemy, "get_LastAttackData")
+        if attack == nil then return false, "this enemy has no last attack data" end
+    else
+        attack = sdk.create_instance("chainsaw.collision.AttackHitUserData.AttackData")
+        if attack ~= nil then
+            pcall(function() attack:add_ref() end)
+            try_call(attack, ".ctor")
+        end
+    end
+
+    local info = new_damage_info()
+    if info == nil then return false, "could not create a DamageInfo" end
+    set(info, "set_Damage", 1)
+    set(info, "set_Wince", wince)
+    set(info, "set_Stopping", stopping)
+    set(info, "set_Break", brk)
+    set(info, "set_DamageDir", dir)
+    set(info, "set_IsActive", true)
+    set(info, "set_Position", hit_pos)
+    set(info, "set_Normal", Vector3f.new(-dir.x, -dir.y, -dir.z))
+    set(info, "set_DamageGameObject", body)
+    if leon_body ~= nil then
+        set(info, "set_AttackOwnerObject", leon_body)
+        set(info, "set_AttackGameObject", leon_body)
+    end
+    if attack ~= nil then set(info, "set_AttackData", attack) end
+    local ud = damage_user_data(body)
+    if ud ~= nil then set(info, "set_DamageUserData", ud) end
+
+    HIT.building = true
+    local ok, err = pcall(function() hc:call("callbackDamageHit(chainsaw.HitController.DamageInfo)", info) end)
+    HIT.building = false
+    if not ok then return false, "callbackDamageHit failed: " .. tostring(err) end
+    return true, "ok"
+end
+
+-- After a Minecraft hit landed on this enemy (HitPoint hp): its reaction, if a working way is known
+local function flinch_after_hit(hp, from_pos)
+    if not settings.flinch or HIT.method == nil or hp == nil or not enemy_alive(hp) then return end
+    local cm = get_character_manager()
+    local list = cm and try_call(cm, "get_EnemyContextList")
+    local count = list and try_call(list, "get_Count") or 0
+    local hp_address = address_of(hp)
+    for i = 0, count - 1 do
+        local enemy = try_call(list, "get_Item", i)
+        local ehp = enemy and try_call(enemy, "get_HitPoint")
+        if ehp ~= nil and address_of(ehp) == hp_address then
+            local body = try_call(enemy, "get_BodyGameObject")
+            local key = body and address_of(body)
+            if key ~= nil and state.frame - (HIT.last_flinch[key] or -1000) >= FLINCH_COOLDOWN_FRAMES then
+                HIT.last_flinch[key] = state.frame
+                local ok, msg = HIT.flinch(enemy, HIT.method, from_pos)
+                if ok then
+                    HIT.failures = 0
+                else
+                    HIT.failures = HIT.failures + 1
+                    if HIT.failures >= 3 then
+                        HIT.method = nil
+                        HIT.status = "off: it stopped working (" .. tostring(msg) .. ")"
+                    end
+                end
+            end
+            return
+        end
+    end
+end
+
 -- damage is in Minecraft half-hearts; RE4 enemies lose damage/(their Minecraft health) of their max health
-local function damage_enemy(hp, damage, note)
+local function damage_enemy(hp, damage, note, from_pos)
     local current = try_call(hp, "get_CurrentHitPoint") or 0
     local max = try_call(hp, "get_DefaultHitPoint") or current
     local health = mob_health(max)
     local result = apply_re4_damage(hp, max * damage / health)
     debug.combat = string.format("hit for %.1f%s: %s (as a %d-health mob)", damage, note, result, math.floor(health))
+    local ok, err = pcall(flinch_after_hit, hp, from_pos)
+    if not ok then HIT.status = "error: " .. tostring(err) end
 end
 
 local function hit_enemy(damage, note)
@@ -786,12 +1000,20 @@ local function update_enemy_damage()
     if type(totals) ~= "table" then return end
     local first = enemy_damage_seen == nil
     enemy_damage_seen = enemy_damage_seen or {}
+    -- where each fighting mob is (its hit comes from there)
+    local mobs = {}
+    if type(bridge.engaged) == "string" then
+        for key, x, y, z in bridge.engaged:gmatch("([^,;]+),([^,;]+),([^,;]+),([^,;]+);") do
+            local px, py, pz = tonumber(x), tonumber(y), tonumber(z)
+            if px ~= nil and py ~= nil and pz ~= nil then mobs[key] = Vector3f.new(px, py - 1.2, pz) end
+        end
+    end
     for key, total in pairs(totals) do
         local before = enemy_damage_seen[key] or (first and total or 0)
         enemy_damage_seen[key] = total
         if type(total) == "number" and total > before then
             local hp = enemy_hp_by_key(key)
-            if enemy_alive(hp) then damage_enemy(hp, total - before, " (in Minecraft)") end
+            if enemy_alive(hp) then damage_enemy(hp, total - before, " (in Minecraft)", mobs[key]) end
         end
     end
 end
@@ -1204,6 +1426,8 @@ re.on_draw_ui(function()
         changed, settings.movement = imgui.checkbox("Minecraft movement", settings.movement)
         changed, settings.combat = imgui.checkbox("Melee combat (left-click)", settings.combat)
         changed, settings.enemies_look_at_mobs = imgui.checkbox("Enemies look at the Minecraft mobs fighting them", settings.enemies_look_at_mobs)
+        changed, settings.flinch = imgui.checkbox("Enemies flinch at Minecraft hits", settings.flinch)
+        imgui.text("  Flinch: " .. HIT.status)
         changed, settings.no_damage = imgui.checkbox("No damage", settings.no_damage)
         changed, settings.swap_left_right = imgui.checkbox("Swap left/right (if A and D are backwards)", settings.swap_left_right)
         changed, settings.fly_speed = imgui.slider_float("Fly speed without Minecraft (m/s)", settings.fly_speed, 2.0, 40.0)

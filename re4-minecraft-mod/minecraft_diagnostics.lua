@@ -376,8 +376,11 @@ local hook_args = {}
 local hooked = {}
 local captures = {}        -- the first hits while recording: who was hit and every field of the DamageInfo
 local motion_log = {}      -- the nearest enemy's animation/state changes while recording, with the hits
-local replay = nil         -- the last hit on an enemy: { hc, info (a copy), body_address, frame }
-local replaying = false    -- the flinch test is calling callbackDamageHit itself (not a real hit)
+local reaction_watch = {}  -- enemies RE4 itself just hit: body address -> { enemy, until_frame, last }
+local reaction_log = {}    -- what those enemies did right after (behavior states, animations)
+local states_seen = {}     -- every behavior state seen on enemies near Leon -> times seen
+local states_seen_count = 0
+local MAX_REACTION_LOG, MAX_STATES = 300, 400
 local MAX_CAPTURES = 4
 local MAX_MOTION_LOG = 300
 local last_motion_key = nil
@@ -476,12 +479,9 @@ local function on_damage_hit(args)
     local ctx = player_context()
     local leon_body = ctx and try_call(ctx, "get_BodyGameObject")
     local on_leon = leon_body ~= nil and go ~= nil and address_of(leon_body) == address_of(go)
-    note_motion("HIT on " .. tostring(name) .. (on_leon and " (Leon)" or ""))
-    if #captures < MAX_CAPTURES then
-        captures[#captures + 1] = { frame = frames, hit = tostring(name), on_leon = on_leon, fields = dump_fields(info, 0) }
-    end
-    -- Only hits on enemies arm the flinch test (not Leon, crates or other objects)
-    local on_enemy = false
+    if recording then note_motion("HIT on " .. tostring(name) .. (on_leon and " (Leon)" or "")) end
+    -- Which enemy (not Leon, crates or other objects)
+    local hit_enemy = nil
     local cm = sdk.get_managed_singleton(sdk.game_namespace("CharacterManager"))
     local list = cm and try_call(cm, "get_EnemyContextList")
     local count = list and try_call(list, "get_Count") or 0
@@ -489,18 +489,38 @@ local function on_damage_hit(args)
     for i = 0, count - 1 do
         local e = try_call(list, "get_Item", i)
         local b = e and try_call(e, "get_BodyGameObject")
-        if b ~= nil and hit_address ~= nil and address_of(b) == hit_address then on_enemy = true end
+        if b ~= nil and hit_address ~= nil and address_of(b) == hit_address then hit_enemy = e end
     end
-    if on_enemy then
-        -- Keep a copy for the flinch test (RE4 may reuse the original for its next hit)
-        local okc, copy = pcall(function() return info:call("MemberwiseClone") end)
-        if okc and copy ~= nil then
-            pcall(function() copy:add_ref() end)
-            pcall(function() hc:add_ref() end)
-            replay = { hc = hc, info = copy, body_address = address_of(go), name = tostring(name), frame = frames }
+    if #captures < MAX_CAPTURES and (on_leon or hit_enemy ~= nil) then
+        captures[#captures + 1] = { frame = frames, hit = tostring(name), on_leon = on_leon, fields = dump_fields(info, 0) }
+    end
+    if hit_enemy ~= nil then
+        -- watch what the enemy does next (its damage reaction states), for 1.5 s
+        reaction_watch[hit_address] = { enemy = hit_enemy, name = tostring(name), until_frame = frames + 90, last = nil }
+        if #reaction_log < MAX_REACTION_LOG then
+            reaction_log[#reaction_log + 1] = string.format("[%d] RE4 hit %s (wince %s, stopping %s, damage %s)", frames,
+                tostring(name), tostring(try_call(info, "get_Wince")), tostring(try_call(info, "get_Stopping")),
+                tostring(try_call(info, "get_Damage")))
         end
     end
 end
+
+-- Our own hits (minecraft_gameplay.lua building a hit for a Minecraft attack) are not RE4's
+local function our_own_hit()
+    local H = MinecraftRE4Hit
+    return type(H) == "table" and H.building == true
+end
+
+-- RE4's real hits are captured all the time (they are rare, so this costs nothing)
+pcall(function()
+    local td = sdk.find_type_definition("chainsaw.HitController")
+    local m = td and td:get_method("callbackDamageHit(chainsaw.HitController.DamageInfo)")
+    if m == nil then return end
+    sdk.hook(m, function(args)
+        if our_own_hit() then return end
+        pcall(on_damage_hit, args)
+    end, function(retval) return retval end)
+end)
 
 local function hook_all()
     for type_name, names in pairs(HIT_HOOKS) do
@@ -515,13 +535,11 @@ local function hook_all()
             local key = type_name .. "." .. tostring(n) .. "/" .. tostring(okp and params or "?")
             if ok and wanted and not hooked[key] then
                 hooked[key] = true
-                local is_damage_hit = type_name == "chainsaw.HitController" and n == "callbackDamageHit"
                 pcall(function()
                     sdk.hook(m, function(args)
-                        if not recording or replaying then return end
+                        if not recording or our_own_hit() then return end
                         hook_counts[key] = (hook_counts[key] or 0) + 1
                         if hook_args[key] == nil then hook_args[key] = arg_types(args) end
-                        if is_damage_hit then pcall(on_damage_hit, args) end
                     end, function(retval) return retval end)
                 end)
             end
@@ -697,31 +715,19 @@ local function start_live(kind)
         for _, h in ipairs(live.handles) do r.components[#r.components + 1] = h.type end
         if #live.handles == 0 then r.result = "no component with set_TargetPos(via.vec3)" end
     elseif kind == "flinch" then
-        local body = try_call(enemy, "get_BodyGameObject")
-        if replay == nil then
-            r.result = "no recorded hit: Start recording, hit an enemy once with the knife, then press this"
-        elseif address_of(body) ~= replay.body_address then
-            -- replay on the enemy that was really hit (its own colliders and joints), if it is still alive
-            local cm = sdk.get_managed_singleton(sdk.game_namespace("CharacterManager"))
-            local list = cm and try_call(cm, "get_EnemyContextList")
-            local count = list and try_call(list, "get_Count") or 0
-            local found = nil
-            for i = 0, count - 1 do
-                local e = try_call(list, "get_Item", i)
-                local b = e and try_call(e, "get_BodyGameObject")
-                local hp = e and try_call(e, "get_HitPoint")
-                if b ~= nil and address_of(b) == replay.body_address and hp ~= nil and try_call(hp, "get_IsLive") == true then found = e end
-            end
-            if found == nil then
-                r.result = "the enemy you hit while recording is dead or gone: record a hit on a living one"
-            else
-                live.enemy = found
-                okt, etype = pcall(function() return found:get_type_definition():get_full_name() end)
-                r.enemy = okt and etype or "?"
-            end
+        -- Minecraft's hit code (minecraft_gameplay.lua) tried every way it knows, one after the other
+        local H = MinecraftRE4Hit
+        if type(H) ~= "table" or type(H.flinch) ~= "function" then
+            r.result = "minecraft_gameplay.lua (which has the hit code) is not running"
+        else
+            live.methods = {}
+            if H.template ~= nil then live.methods[#live.methods + 1] = "template" end
+            if try_call(enemy, "get_LastAttackData") ~= nil then live.methods[#live.methods + 1] = "last_attack" end
+            live.methods[#live.methods + 1] = "fresh"
+            live.per = {}
+            r.methods = live.methods
+            r.real_hit_seen = H.template ~= nil
         end
-        r.replayed_hit = replay and replay.name or nil
-        live.changes = {}
     end
     if r.result ~= nil then
         live_results[#live_results + 1] = r
@@ -847,65 +853,70 @@ local function step_live()
             finish_live()
         end
     elseif t.kind == "flinch" then
-        -- First a while without the hit (does its animation change by itself?), then the replayed hit
+        -- First a while without any hit (does its animation change by itself?), then one Minecraft-style hit
+        -- per way of building it, FLINCH_FRAMES apart. The enemy is kept at full health meanwhile.
         local state = motion_state(enemy)
-        local f = t.frame - FLINCH_BASE_FRAMES   -- frames since the replayed hit
         if t.frame == 1 then
             t.last_state, t.base_changes = state, 0
-        elseif f < 1 and state ~= t.last_state then
-            t.base_changes = t.base_changes + 1
-            t.last_state = state
-        end
-        if f == 1 then
             t.result.hp_before = try_call(hp, "get_CurrentHitPoint")
-            t.result.motion_before = state
-            t.last_state = state
-            -- full health for the replay so it can't kill the enemy (its own health comes back at the end)
             t.max = try_call(hp, "get_DefaultHitPoint")
-            if t.max ~= nil then try_call(hp, "set_CurrentHitPoint", t.max) end
-            replaying = true
-            local ok, err = pcall(function() replay.hc:call("callbackDamageHit(chainsaw.HitController.DamageInfo)", replay.info) end)
-            replaying = false
-            t.result.call = ok and "called" or ("failed: " .. tostring(err))
-            t.result.hp_after_call = try_call(hp, "get_CurrentHitPoint")
-        elseif f > 1 and state ~= t.last_state then
-            t.changes[#t.changes + 1] = string.format("[%d] %s", f, state)
-            t.last_state = state
         end
-        if f >= 1 and t.max ~= nil then
-            -- RE4 may apply the damage a few frames later: keep the enemy alive until the end
+        if t.frame <= FLINCH_BASE_FRAMES then
+            if t.frame > 1 and state ~= t.last_state then
+                t.base_changes = t.base_changes + 1
+                t.last_state = state
+            end
+        else
+            local f = t.frame - FLINCH_BASE_FRAMES - 1
+            local index, fi = f // FLINCH_FRAMES + 1, f % FLINCH_FRAMES
+            if index > #t.methods then
+                if t.result.hp_before ~= nil then try_call(hp, "set_CurrentHitPoint", t.result.hp_before) end
+                t.result.changes_before_hits = t.base_changes
+                t.result.per_method = t.per
+                local works = nil
+                for _, m in ipairs(t.per) do
+                    if m.reacted and works == nil then works = m.method end
+                end
+                if works ~= nil then
+                    t.result.result = "the enemy reacted to the '" .. works .. "' hit: Minecraft hits now make enemies flinch"
+                    local H = MinecraftRE4Hit
+                    H.method = works
+                    local when = os.date and os.date("%Y-%m-%d %H:%M") or "?"
+                    H.status = "on (" .. works .. ", tested " .. when .. ")"
+                    pcall(json.dump_file, "minecraft_flinch.json", { works = true, method = works, time = when })
+                else
+                    t.result.result = "no clear reaction to any of the hits (send the report; try again on an enemy that is standing or walking)"
+                end
+                finish_live()
+                return
+            end
+            local cur = t.per[index]
+            if fi == 0 then
+                cur = { method = t.methods[index], changes = {}, state_before = state }
+                t.per[index] = cur
+                t.last_state = state
+                if t.max ~= nil then try_call(hp, "set_CurrentHitPoint", t.max) end
+                local ok, done, msg = pcall(MinecraftRE4Hit.flinch, enemy, cur.method, me)
+                cur.call = (ok and done) and "called" or ("failed: " .. tostring(ok and msg or done))
+            elseif state ~= t.last_state then
+                cur.changes[#cur.changes + 1] = string.format("[%d] %s", fi, state)
+                t.last_state = state
+                local damage_like = state:lower():find("dam") or state:lower():find("wince") or state:lower():find("hit")
+                    or state:lower():find("stagger") or state:lower():find("flinch") or state:lower():find("knock")
+                if fi <= 12 and cur.call == "called" and (t.base_changes == 0 or damage_like) then cur.reacted = true end
+                if damage_like then cur.damage_state = state end
+            end
+            -- RE4 may apply the hit's damage a few frames later: keep the enemy alive until the end
             local now = try_call(hp, "get_CurrentHitPoint")
-            if now ~= nil and now < t.max then
-                t.result.damage_seen = math.max(t.result.damage_seen or 0, t.max - now)
-                try_call(hp, "set_CurrentHitPoint", t.max)
-            end
-        end
-        if f >= FLINCH_FRAMES then
-            if t.result.hp_before ~= nil then try_call(hp, "set_CurrentHitPoint", t.result.hp_before) end
-            t.result.motion_changes = t.changes
-            t.result.changes_before_replay = t.base_changes
-            local quick = false
-            for _, c in ipairs(t.changes) do
-                local n = tonumber(c:match("^%[(%d+)%]"))
-                if n ~= nil and n <= 10 then quick = true end
-            end
-            if not quick then
-                t.result.result = "no animation change right after the replayed hit"
-            elseif t.base_changes == 0 then
-                t.result.result = "the enemy's animation changed right after the replayed hit (it reacted)"
-            else
-                t.result.result = "the animation changed after the replayed hit, but it also changed by itself before (watch: did it flinch?)"
-            end
-            finish_live()
+            if t.max ~= nil and now ~= nil and now < t.max then try_call(hp, "set_CurrentHitPoint", t.max) end
         end
     end
 end
 
 re.on_pre_application_entry("UpdateBehavior", function()
-    -- No Leon (loading, title screen): the recorded hit's enemy and objects may be gone, never replay it,
-    -- and a running test stops without touching its enemy again
-    if (replay ~= nil or live ~= nil) and player_context() == nil then
-        replay = nil
+    -- No Leon (loading, title screen): enemies may be gone, a running test stops without touching its enemy again
+    if player_context() == nil then
+        for k in pairs(reaction_watch) do reaction_watch[k] = nil end
         if live ~= nil then
             live.result.result = "stopped: Leon went away (loading or menu)"
             live_results[#live_results + 1] = live.result
@@ -915,7 +926,10 @@ re.on_pre_application_entry("UpdateBehavior", function()
     if pending_test ~= nil then
         local k = pending_test
         pending_test = nil
-        if k == "look" or k == "walk" or k == "flinch" then
+        if k == "spawn_cube" or k == "spawn_statue" or k == "remove_spawned" then
+            local ok, e = pcall(spawn_test, k)
+            if not ok then log("spawn test error: " .. tostring(e)) end
+        elseif k == "look" or k == "walk" or k == "flinch" then
             local ok, e = pcall(start_live, k)
             if not ok then log("live test error: " .. tostring(e)); live = nil end
         else
@@ -933,6 +947,31 @@ re.on_pre_application_entry("UpdateBehavior", function()
                 live_results[#live_results + 1] = live.result
                 live = nil
             end
+        end
+    end
+    -- Enemies RE4 just hit: what they do next (their damage reaction)
+    for key, w in pairs(reaction_watch) do
+        if frames > w.until_frame then
+            reaction_watch[key] = nil
+        else
+            local okm, state = pcall(motion_state, w.enemy)
+            if okm and state ~= w.last then
+                w.last = state
+                if #reaction_log < MAX_REACTION_LOG then
+                    reaction_log[#reaction_log + 1] = string.format("[%d] %s: %s", frames, w.name, state)
+                end
+            end
+        end
+    end
+    -- Every behavior state the nearest enemy goes through (names of RE4's enemy states)
+    if frames % 15 == 0 and states_seen_count < MAX_STATES then
+        local enemy = nearest_live_enemy()
+        local body = enemy and try_call(enemy, "get_BodyGameObject")
+        local fsm = body and fsm_type and try_call(body, "getComponent(System.Type)", fsm_type)
+        local node = fsm and try_call(fsm, "getCurrentNodeName", 0)
+        if type(node) == "string" then
+            if states_seen[node] == nil then states_seen_count = states_seen_count + 1 end
+            states_seen[node] = (states_seen[node] or 0) + 1
         end
     end
     -- While recording: the nearest enemy's animation/state changes, next to the hits
@@ -960,10 +999,154 @@ re.on_application_entry("LateUpdateBehavior", function()
 end)
 
 ------------------------------------------------------------------------------
+-- Spawn test: are objects we create real RE4 objects (lit, shadowed and hidden by walls like RE4's own)?
+-- That decides whether Minecraft's mobs can be made of RE4 objects instead of drawn over the picture.
+------------------------------------------------------------------------------
+
+local spawned = {}
+local spawn_results = {}
+
+local function spawn_game_object(name)
+    local td = sdk.find_type_definition("via.GameObject")
+    local create = td and td:get_method("create(System.String)")
+    if create == nil then return nil, "via.GameObject.create(System.String) not found" end
+    local ok, go = pcall(function() return create:call(nil, name) end)
+    if not ok or go == nil then return nil, "create failed: " .. tostring(go) end
+    pcall(function() go:add_ref() end)
+    pcall(function() go:call(".ctor") end)
+    spawned[#spawned + 1] = go
+    return go
+end
+
+local function add_component(go, type_name)
+    local t = sdk.typeof(type_name)
+    if t == nil then return nil, type_name .. " not found" end
+    local ok, comp = pcall(function() return go:call("createComponent(System.Type)", t) end)
+    if not ok or comp == nil then return nil, "createComponent failed: " .. tostring(comp) end
+    pcall(function() comp:add_ref() end)
+    pcall(function() comp:call(".ctor") end)
+    return comp
+end
+
+local function place(go, pos, scale)
+    local tr = try_call(go, "get_Transform")
+    if tr == nil then return "no transform" end
+    local ok1 = pcall(function() tr:call("set_Position", pos) end)
+    local ok2 = scale == nil or pcall(function() tr:call("set_LocalScale", Vector3f.new(scale, scale, scale)) end)
+    return (ok1 and ok2) and "placed" or "could not place"
+end
+
+-- Where Leon is and which way the camera looks (flat)
+local function leon_and_forward()
+    local ctx = player_context()
+    local body = ctx and try_call(ctx, "get_BodyGameObject")
+    local me = body and try_call(try_call(body, "get_Transform"), "get_Position")
+    local fx, fz = 0, 1
+    local cam = sdk.get_primary_camera()
+    local cgo = cam and try_call(cam, "get_GameObject")
+    local az = cgo and try_call(try_call(cgo, "get_Transform"), "get_AxisZ")
+    if az ~= nil then
+        local len = math.sqrt(az.x * az.x + az.z * az.z)
+        if len > 0.01 then fx, fz = -az.x / len, -az.z / len end
+    end
+    return me, fx, fz
+end
+
+local function spawn_test(kind)
+    local r = { test = kind }
+    if kind == "remove_spawned" then
+        for _, go in ipairs(spawned) do pcall(function() go:call("destroy(via.GameObject)", go) end) end
+        r.result = string.format("removed %d test objects", #spawned)
+        spawned = {}
+        log(r.result)
+        return
+    end
+    local me, fx, fz = leon_and_forward()
+    if me == nil then
+        r.result = "Leon not found"
+    elseif kind == "spawn_cube" then
+        local go, err = spawn_game_object("MinecraftTestCube")
+        if go == nil then
+            r.result = err
+        else
+            local prim, perr = add_component(go, "via.render.Primitive")
+            r.primitive = prim and "created" or perr
+            if prim ~= nil then
+                r.shape = pcall(function() prim:call("set_ShapeType", 2) end) and "cube" or "set_ShapeType failed"
+                r.shadow = pcall(function() prim:call("set_DrawShadowCast", true) end) and "on" or "set_DrawShadowCast failed"
+            end
+            r.place = place(go, Vector3f.new(me.x + fx * 2.5, me.y + 1.0, me.z + fz * 2.5), 0.6)
+            r.result = prim and "a cube should float 2.5 m in front of Leon: is it lit, shadowed and hidden by walls like RE4's things?"
+                or "could not add the cube"
+        end
+    elseif kind == "spawn_statue" then
+        -- a copy of the nearest enemy's model, as a new object (tests giving our objects a model)
+        local enemy = nearest_live_enemy()
+        local ebody = enemy and try_call(enemy, "get_BodyGameObject")
+        local mesh = ebody and try_call(ebody, "getComponent(System.Type)", sdk.typeof("via.render.Mesh"))
+        local holder = mesh and (try_call(mesh, "getMesh") or try_call(mesh, "get_Mesh"))
+        local material = mesh and try_call(mesh, "get_Material")
+        if holder == nil then
+            r.result = "no enemy model to copy (stand near an enemy)"
+        else
+            local go, err = spawn_game_object("MinecraftTestStatue")
+            local comp, cerr = go and add_component(go, "via.render.Mesh")
+            if comp == nil then
+                r.result = err or cerr
+            else
+                r.set_mesh = pcall(function() comp:call("setMesh", holder) end) and "ok" or "setMesh failed"
+                r.set_material = material == nil and "no material found"
+                    or (pcall(function() comp:call("set_Material", material) end) and "ok" or "set_Material failed")
+                r.place = place(go, Vector3f.new(me.x + fx * 2.5 - fz * 1.5, me.y, me.z + fz * 2.5 + fx * 1.5), nil)
+                r.result = "a copy of the enemy's model should stand ahead and to the side of Leon (possibly in a T pose)"
+            end
+        end
+    end
+    spawn_results[#spawn_results + 1] = r
+    log(kind .. ": " .. tostring(r.result))
+    report_now = true
+end
+
+re.on_script_reset(function()
+    for _, go in ipairs(spawned) do pcall(function() go:call("destroy(via.GameObject)", go) end) end
+    spawned = {}
+end)
+
+-- The main camera's components and their exposure/fog settings (to match Minecraft's brightness to RE4)
+local function camera_components()
+    local out = {}
+    local cam = sdk.get_primary_camera()
+    local go = cam and try_call(cam, "get_GameObject")
+    local comps = go and try_call(go, "get_Components")
+    local ok, elems = pcall(function() return comps:get_elements() end)
+    if not ok or elems == nil then return "no camera" end
+    for _, comp in ipairs(elems) do
+        local okt, td = pcall(function() return comp:get_type_definition() end)
+        if okt and td ~= nil then
+            local entry = { type = td:get_full_name(), values = {} }
+            for _, m in ipairs(td:get_methods() or {}) do
+                local okn, n = pcall(function() return m:get_name() end)
+                local l = okn and n and n:lower() or ""
+                if n and n:find("^get_") and (l:find("expos") or l:find("ev") or l:find("lumin") or l:find("bright")
+                        or l:find("tonemap") or l:find("fog") or l:find("gamma") or l:find("auto")) then
+                    local okp, np = pcall(function() return m:get_num_params() end)
+                    if okp and np == 0 then
+                        local okv, v = pcall(function() return comp:call(n) end)
+                        entry.values[n] = okv and value_of(v, 1) or "?"
+                    end
+                end
+            end
+            out[#out + 1] = entry
+        end
+    end
+    return out
+end
+
+------------------------------------------------------------------------------
 -- Every member of the types a hit and a reaction are made of (for building them for Minecraft hits)
 ------------------------------------------------------------------------------
 
-local FULL_TYPES = { "chainsaw.HitController.DamageInfo", "chainsaw.HitController.DamageValue",
+local FULL_TYPES = { "via.render.Primitive", "chainsaw.HitController.DamageInfo", "chainsaw.HitController.DamageValue",
     "chainsaw.HitController.CalculateInfo", "chainsaw.collision.AttackHitUserData.AttackData",
     "chainsaw.collision.HitInfo", "chainsaw.LookAtRequest", "via.motion.TreeLayer" }
 local KEYWORD_TYPES = {
@@ -974,6 +1157,11 @@ local KEYWORD_TYPES = {
     ["chainsaw.EnemyBodyUpdater"] = { "damage", "wince", "react", "flinch", "stagger", "knock", "down", "stun", "hit",
         "rotate", "turn", "attack", "target", "look" },
     ["chainsaw.CharacterBodyUpdater"] = { "damage", "wince", "react", "hit", "attack", "target", "look" },
+    ["chainsaw.Ch1c0BodyHitDriverCommon"] = { "damage", "wince", "react", "hit", "request", "stagger", "down", "knock", "flinch" },
+    ["chainsaw.CharacterBodyHitDriver"] = { "damage", "wince", "react", "hit", "request", "stagger", "down", "knock", "flinch" },
+    ["via.render.Mesh"] = { "draw", "shadow", "static", "dynamic", "mesh", "material", "enable", "raytrac", "cull" },
+    ["via.physics.Colliders"] = { "collider", "userdata", "num" },
+    ["via.physics.Collider"] = { "userdata", "shape", "enable" },
 }
 
 local function members(td, keywords, limit)
@@ -1054,7 +1242,13 @@ write_report = function()
         damage_tests = test_results,
         live_tests = live_results,
         real_hits = { calls = hook_counts, first_call_arguments = hook_args, captured_hits = captures,
-            nearest_enemy_motion = motion_log, flinch_test_ready = replay ~= nil },
+            nearest_enemy_motion = motion_log, reactions_after_real_hits = reaction_log,
+            real_hit_seen = type(MinecraftRE4Hit) == "table" and MinecraftRE4Hit.template ~= nil },
+        enemy_states_seen = states_seen,
+        spawn_tests = spawn_results,
+        camera_components = camera_components(),
+        flinch = type(MinecraftRE4Hit) == "table" and { method = MinecraftRE4Hit.method, status = MinecraftRE4Hit.status }
+            or "minecraft_gameplay.lua not running",
         hit_and_reaction_types = type_dumps(),
         gui_elements = gui,
         minecraft = type(bridge) == "table" and { in_world = bridge.in_world, re4_control = bridge.re4_control,
@@ -1106,9 +1300,18 @@ re.on_draw_ui(function()
         if imgui.button("Walk test") then pending_test = "walk" end
         imgui.same_line()
         if imgui.button("Flinch test") then pending_test = "flinch" end
-        imgui.text(replay ~= nil and ("  flinch test replays your knife hit on " .. replay.name)
-            or "  flinch test: first record a knife hit on an enemy (above)")
+        local H = MinecraftRE4Hit
+        imgui.text("  Flinch: " .. (type(H) == "table" and tostring(H.status) or "minecraft_gameplay.lua not running"))
+        imgui.text((type(H) == "table" and H.template ~= nil) and "  (a real RE4 hit was seen: the test also copies it)"
+            or "  (better: first press F7, knife an enemy once, F7 again; then run the Flinch test)")
     end
+
+    imgui.text("Real RE4 objects (does RE4 light and shadow objects we create?):")
+    if imgui.button("Spawn test cube") then pending_test = "spawn_cube" end
+    imgui.same_line()
+    if imgui.button("Spawn enemy-model copy") then pending_test = "spawn_statue" end
+    imgui.same_line()
+    if imgui.button("Remove test objects") then pending_test = "remove_spawned" end
 
     imgui.text("Tests on the nearest enemy (they change the game):")
     if imgui.button("Take a quarter of its health") then pending_test = "quarter" end

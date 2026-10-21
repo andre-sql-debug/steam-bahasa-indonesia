@@ -38,6 +38,10 @@ up close too. Damage is Minecraft's: a fist does 1, a diamond sword 7 (a normal 
 within its reach takes a blow (2 hearts) about once a second, so a golem wins fights but not forever. An RE4
 enemy that a Minecraft mob is fighting looks at that mob (RE4's own look-at for enemies), and looks back at
 Leon when the fight ends (setting: **Enemies look at the Minecraft mobs fighting them**).
+Minecraft hits (yours and your mobs') can make RE4 enemies flinch through RE4's own hit code: the mod builds
+the same kind of hit RE4 builds for Leon's knife and hands it to the enemy. Which way of building it works is
+found once by **Minecraft Diagnostics → Flinch test** and saved (`reframework\data\minecraft_flinch.json`);
+until then this stays off (setting: **Enemies flinch at Minecraft hits**).
 
 Minecraft's things sit in RE4's world: they are drawn from RE4's own camera of each frame (see below), so
 they stay exactly in place when you turn or move; RE4's floors and walls hide them like they hide anything
@@ -101,10 +105,13 @@ Copy the `.lua` files into `<RE4 game folder>\reframework\autorun\`. Settings: p
   (or **Save report now**): which RE4 methods the mod uses exist, Leon's joints, nearby enemies and their
   health state, who had Leon how often, frame rate, how RE4's enemies pick targets and what RE4 offers for
   adding objects to its world. **Record real hits** logs which RE4 functions run when RE4 itself hits an
-  enemy, everything that hit carries, and the enemy's animations in reaction. **Live tests** (Look, Walk,
-  Flinch) try RE4's own functions on the nearest enemy for a few seconds and measure by themselves whether the
-  enemy looked at a point, walked to it, or flinched again from a replayed knife hit; the report saves itself
-  after each. Send that file (and `re2_framework_log.txt`, Minecraft's `logs\latest.log`) when reporting a problem.
+  enemy. RE4's own hits on enemies are captured all the time (what the hit carries, and the enemy's
+  behavior states right after: its damage reactions). **Live tests** (Look, Walk, Flinch) try RE4's own
+  functions on the nearest enemy for a few seconds and measure by themselves whether the enemy looked at a
+  point, walked to it, or reacted to a Minecraft-style hit (a working way is saved and switched on); the
+  report saves itself after each. **Spawn test cube / enemy-model copy** create real RE4 objects in front of
+  Leon, to see whether RE4 lights, shadows and hides them like its own (the way to make Minecraft's mobs real
+  RE4 objects). Send that file (and `re2_framework_log.txt`, Minecraft's `logs\latest.log`) when reporting a problem.
 - `minecraft_terrain.lua`: terrain mode (see above). Scans a 10 m radius around Leon in 0.5 m cells and
   places Leon where Minecraft's player is, facing where you look (so RE4's **F** interacts with what you
   look at). Sends RE4's enemies near Leon to Minecraft. **F9** re-anchors the two worlds.
@@ -121,7 +128,7 @@ Copy the `.lua` files into `<RE4 game folder>\reframework\autorun\`. Settings: p
 A client-only Fabric mod for Minecraft Java **1.21.1**.
 
 1. Install a Java 21 JDK (e.g. Eclipse Temurin 21).
-2. Build: in `minecraft-bridge-mod`, run `gradlew.bat build` (Windows). The mod is `build\libs\re4bridge-0.11.0.jar`.
+2. Build: in `minecraft-bridge-mod`, run `gradlew.bat build` (Windows). The mod is `build\libs\re4bridge-0.12.0.jar`.
 3. Install Fabric Loader for 1.21.1 (Fabric installer, or a Fabric 1.21.1 profile in the CurseForge/Modrinth app)
    and put the jar in that profile's `mods` folder.
 4. Start Minecraft once. `config\re4bridge.txt` holds the path of the file it writes; change it if RE4 is

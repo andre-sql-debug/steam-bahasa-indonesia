@@ -27,6 +27,7 @@ local BRIDGE_FILE = "minecraft_bridge.json"
 local RAY_ABOVE = 2.0          -- floor rays start this far above Leon's feet...
 local RAY_BELOW = 4.0          -- ...and look this far below them
 local WALL_RAY_HEIGHT = 0.9    -- wall rays run this far above each cell's floor
+local WALL_PROBE_HEIGHTS = { 1.5, 2.2 }   -- then these, to tell a railing from a wall (how much it hides)
 local REFRESH_SECONDS = 5.0    -- rescan cells older than this (doors, moving things)
 local RECENTER_DISTANCE = 1.5  -- start the scan around Leon again after he moved this far
 local TELEPORT_DISTANCE = 3.0  -- the game moved Leon this far in one frame = move Minecraft's player too
@@ -213,7 +214,19 @@ end
 
 local function cell_key(i, k) return i .. "," .. k end
 
--- Scans one cell: floor height, and walls toward its +x and +z neighbors
+-- How tall a wall found at the first wall ray is: 0 = low (a railing, a crate), 1 = chest high, 2 = full
+local function wall_level(cx, cz, floor_y, dx, dz)
+    local level = 0
+    for n, height in ipairs(WALL_PROBE_HEIGHTS) do
+        local y = floor_y + height
+        if cast_ray(Vector3f.new(cx, y, cz), Vector3f.new(cx + dx, y, cz + dz), terrain_layer) == nil then break end
+        level = n
+    end
+    return level
+end
+
+-- Scans one cell: floor height, and walls toward its +x and +z neighbors.
+-- flags: bit 1 / bit 2 = wall toward +x / +z; bits 3-4 / 5-6 = how tall each wall is (wall_level)
 local function scan_cell(i, k, ref_y)
     local a = state.anchor_re4
     local cs = settings.cell
@@ -224,10 +237,10 @@ local function scan_cell(i, k, ref_y)
         cell.h = hit.y - a.y
         local wy = hit.y + WALL_RAY_HEIGHT
         if cast_ray(Vector3f.new(cx, wy, cz), Vector3f.new(cx + cs, wy, cz), terrain_layer) ~= nil then
-            cell.flags = cell.flags | 1
+            cell.flags = cell.flags | 1 | (wall_level(cx, cz, hit.y, cs, 0) << 2)
         end
         if cast_ray(Vector3f.new(cx, wy, cz), Vector3f.new(cx, wy, cz + cs), terrain_layer) ~= nil then
-            cell.flags = cell.flags | 2
+            cell.flags = cell.flags | 2 | (wall_level(cx, cz, hit.y, 0, cs) << 4)
         end
     end
     state.cells[cell_key(i, k)] = cell

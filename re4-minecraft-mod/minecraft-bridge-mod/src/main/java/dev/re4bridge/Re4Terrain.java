@@ -29,6 +29,9 @@ public final class Re4Terrain {
     private static final double GROUND_THICKNESS = 3.0;
     private static final double WALL_HEIGHT = 2.2;
     private static final double WALL_THICKNESS = 0.1;
+    // How high a wall hides things, by how tall RE4's scan found it (flags bits 3-4 / 5-6): a railing hides
+    // only what is behind its own height, not the upper body of a mob standing behind it
+    private static final double[] WALL_OCCLUDE_HEIGHT = { 1.0, 1.6, WALL_HEIGHT };
     private static final double BUCKET = 2.0;   // spatial hash cell size for lookups
 
     private record Snapshot(long epoch, double centerX, double centerZ, double radius,
@@ -236,7 +239,8 @@ public final class Re4Terrain {
     /**
      * Loads a terrain message from RE4. Cells are "i,k,h,flags;" with i,k the cell index from Leon's
      * anchor position, h the floor height relative to it (or "x" when the raycast found no floor, which is
-     * treated as a wall), and flags bit 1 / bit 2 = wall toward the +x / +z neighbor.
+     * treated as a wall), and flags bit 1 / bit 2 = wall toward the +x / +z neighbor, bits 3-4 / 5-6 = how tall
+     * that wall is (0 = railing height, 1 = chest high, 2 = full).
      */
     public static boolean load(JsonObject terrain) {
         if (!terrain.has("epoch") || terrain.get("epoch").getAsLong() != anchorEpoch || anchorEpoch == 0) {
@@ -293,7 +297,7 @@ public final class Re4Terrain {
                 AABB wall = new AABB(xw - WALL_THICKNESS, anchorY + Math.min(h, hn), z0,
                         xw + WALL_THICKNESS, anchorY + Math.max(h, hn) + WALL_HEIGHT, z0 + cell);
                 add(buckets, wall);
-                occluders.add(wall);
+                occluders.add(wall.setMaxY(anchorY + Math.max(h, hn) + WALL_OCCLUDE_HEIGHT[Math.min(2, (flags >> 2) & 3)]));
                 count++;
             }
             if ((flags & 2) != 0) {
@@ -302,7 +306,7 @@ public final class Re4Terrain {
                 AABB wall = new AABB(x0, anchorY + Math.min(h, hn), zw - WALL_THICKNESS,
                         x0 + cell, anchorY + Math.max(h, hn) + WALL_HEIGHT, zw + WALL_THICKNESS);
                 add(buckets, wall);
-                occluders.add(wall);
+                occluders.add(wall.setMaxY(anchorY + Math.max(h, hn) + WALL_OCCLUDE_HEIGHT[Math.min(2, (flags >> 4) & 3)]));
                 count++;
             }
         }
