@@ -372,46 +372,30 @@ local function update_from_minecraft(player, dt)
         state.velocity = velocity
     end
 
-    -- Vertical: Leon stays as high above RE4's floor as Minecraft's player is above its flat ground
-    -- (jumping, flying, standing on placed blocks). A jump press starts a predicted jump right away;
-    -- Minecraft's real height takes over as soon as it arrives.
-    local elevation = move.elevation or 0
+    -- Vertical: only Minecraft's way UP (jumping, flying) moves Leon up or down; everything else
+    -- (standing, walking, falling back down) is RE4's own ground and gravity. So Minecraft terrain
+    -- can never push Leon into RE4's floor. A jump press starts a predicted jump right away;
+    -- Minecraft's real jump takes over as soon as it arrives.
     local mc_airborne = move.flying == true or move.on_ground == false
-    local mc_up = mc_airborne or elevation > 0.01
-    local base = state.auth_pos or state.frame_start_pos
-
-    if keys.jump and state.vy == nil and state.predicted_jump_time == nil and not mc_up then
+    if keys.jump and state.vy == nil and state.predicted_jump_time == nil and not mc_airborne then
         state.predicted_jump_time = state.time
     end
-    if state.predicted_jump_time ~= nil and (mc_up or state.time - state.predicted_jump_time > JUMP_PREDICT_SECONDS) then
+    if state.predicted_jump_time ~= nil and (mc_airborne or state.time - state.predicted_jump_time > JUMP_PREDICT_SECONDS) then
         state.predicted_jump_time = nil
     end
 
-    if not mc_up and state.predicted_jump_time == nil and state.vy == nil and base ~= nil then
-        state.floor_y = base.y
-    end
-    if state.floor_y == nil and base ~= nil then
-        state.floor_y = base.y - elevation
-    end
-
-    local target = nil
-    if state.predicted_jump_time ~= nil and state.floor_y ~= nil then
-        local t = state.time - state.predicted_jump_time
-        target = state.floor_y + math.max(0, MC.jump_velocity * t - 0.5 * MC.gravity * t * t)
-        state.smooth_y = target
-    elseif mc_up and state.floor_y ~= nil and base ~= nil then
-        -- Minecraft updates 20 times per second; ease toward its height so it looks smooth
-        local goal = state.floor_y + elevation
-        local from = state.smooth_y or base.y
-        state.smooth_y = from + (goal - from) * math.min(1, 20 * dt)
-        target = state.smooth_y
-    else
-        state.smooth_y = nil
-    end
-
     local vy = nil
-    if target ~= nil and base ~= nil then
-        vy = math.max(-40, math.min(40, (target - base.y) / dt))
+    local mc_vy = (move.up or 0) * TICKS_PER_SECOND
+    if state.predicted_jump_time ~= nil then
+        local t = state.time - state.predicted_jump_time
+        vy = MC.jump_velocity - MC.gravity * t
+        if vy <= 0 then vy = nil end
+    elseif move.flying == true then
+        -- Flying down stops on RE4's ground
+        vy = mc_vy
+        if vy < 0 and is_on_ground(player) then vy = nil end
+    elseif mc_airborne and mc_vy > 0 then
+        vy = mc_vy
     end
     set_vertical(player, vy)
 

@@ -1,7 +1,8 @@
 // RE4 Minecraft overlay: an REFramework plugin that draws Minecraft's live UI over RE4.
 // It also reads the raw mouse (movement and buttons) and writes it to
 // reframework\data\minecraft_mouse.json every frame, so the Lua scripts can do Minecraft-style
-// mouse look without RE4's own camera behavior.
+// mouse look without RE4's own camera behavior. While Minecraft is in control, RE4 itself doesn't
+// get the mouse (no aiming, no camera turning); F7 gives the mouse back to RE4 and takes it again.
 //
 // The RE4 Bridge Minecraft mod renders only its hand, held item and HUD on a see-through
 // background and writes every frame into reframework\data\minecraft_overlay.bin. This plugin
@@ -120,6 +121,11 @@ struct SharedFrame {
 };
 
 SharedFrame g_shared;
+
+// True while Minecraft streams its picture (RE4 is in control of Minecraft); set by the renderer
+volatile LONG g_minecraft_active = 0;
+// F7 toggles whether RE4 gets the mouse while Minecraft is active
+volatile LONG g_keep_mouse_from_re4 = 1;
 
 // ---------------------------------------------------------------------------------------------
 // D3D12 drawing
@@ -477,7 +483,10 @@ struct Renderer {
         if (!g_shared.open()) return;
 
         const SharedFrame& s = g_shared;
-        if (s.u32(0) != MAGIC || s.u32(20) == 0) return;   // Minecraft isn't streaming
+        if (s.u32(0) != MAGIC || s.u32(20) == 0) {   // Minecraft isn't streaming
+            InterlockedExchange(&g_minecraft_active, 0);
+            return;
+        }
         uint64_t counter = s.u64(24);
         DWORD now = GetTickCount();
         bool new_frame = counter != last_frame;
@@ -485,8 +494,10 @@ struct Renderer {
             last_frame = counter;
             last_frame_time = now;
         } else if (now - last_frame_time > STALE_MS) {
+            InterlockedExchange(&g_minecraft_active, 0);
             return;   // Minecraft stopped (closed or frozen): show nothing
         }
+        InterlockedExchange(&g_minecraft_active, 1);
 
         UINT w = s.u32(8), h = s.u32(12);
         if (w == 0 || h == 0 || w > MAX_WIDTH || h > MAX_HEIGHT) return;
@@ -598,7 +609,34 @@ bool on_message(void* hwnd, unsigned int msg, unsigned long long wparam, long lo
             if (m.usButtonFlags & RI_MOUSE_RIGHT_BUTTON_UP) InterlockedExchange(&g_right_down, 0);
         }
     }
-    return true;   // the game still gets every message
+
+    if (msg == WM_KEYDOWN && wparam == VK_F7 && (lparam & (1LL << 30)) == 0) {
+        InterlockedExchange(&g_keep_mouse_from_re4, g_keep_mouse_from_re4 ? 0 : 1);
+    }
+
+    // While Minecraft is in control, RE4 doesn't get the mouse: Minecraft does the looking and clicking
+    bool menu_open = g_param != nullptr && g_param->functions->is_drawing_ui();
+    if (g_minecraft_active && g_keep_mouse_from_re4 && !menu_open) {
+        switch (msg) {
+        case WM_INPUT: {
+            RAWINPUTHEADER header{};
+            UINT size = sizeof(header);
+            if (GetRawInputData((HRAWINPUT)lparam, RID_HEADER, &header, &size, sizeof(RAWINPUTHEADER)) != (UINT)-1 &&
+                header.dwType == RIM_TYPEMOUSE) {
+                return false;
+            }
+            break;
+        }
+        case WM_MOUSEMOVE: case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
+        case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_RBUTTONDBLCLK:
+        case WM_MBUTTONDOWN: case WM_MBUTTONUP: case WM_MOUSEWHEEL: case WM_MOUSEHWHEEL:
+        case WM_XBUTTONDOWN: case WM_XBUTTONUP:
+            return false;
+        default:
+            break;
+        }
+    }
+    return true;   // the game gets every other message
 }
 
 void write_mouse() {
@@ -606,10 +644,11 @@ void write_mouse() {
     static std::wstring tmp = data_folder() + L"minecraft_mouse.json.tmp";
     FILE* f = _wfopen(tmp.c_str(), L"wb");
     if (f == nullptr) return;
-    fprintf(f, "{\"frame\":%llu,\"x\":%lld,\"y\":%lld,\"left_presses\":%lld,\"right_presses\":%lld,\"left\":%s,\"right\":%s}",
+    fprintf(f, "{\"frame\":%llu,\"x\":%lld,\"y\":%lld,\"left_presses\":%lld,\"right_presses\":%lld,\"left\":%s,\"right\":%s,\"minecraft_has_mouse\":%s}",
             (unsigned long long)g_present_count, (long long)g_mouse_x, (long long)g_mouse_y,
             (long long)g_left_presses, (long long)g_right_presses,
-            g_left_down ? "true" : "false", g_right_down ? "true" : "false");
+            g_left_down ? "true" : "false", g_right_down ? "true" : "false",
+            (g_minecraft_active && g_keep_mouse_from_re4) ? "true" : "false");
     fclose(f);
     MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
 }

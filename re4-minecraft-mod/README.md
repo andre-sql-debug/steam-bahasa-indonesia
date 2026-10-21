@@ -25,6 +25,8 @@ on a see-through background, at RE4's half resolution with GUI scale 2 and 60 FP
 REFramework plugin (`re4-overlay-plugin/`, built with MinGW-w64 via `build.sh`) draws it over RE4. So the
 HUD, held items, swing animations, item names and attack indicator are Minecraft's own. Keep the Minecraft
 window open behind RE4 (not minimized). The Lua HUD only draws its own copy when the plugin isn't running.
+While Minecraft is in control, the plugin keeps the mouse away from RE4 (no aiming or RE4 camera
+turning); **F7** gives the mouse and movement back to RE4 (doors, ladders, menus) and takes them again.
 
 ## RE4 side
 Requirements: RE4 Remake on PC (Steam) and [REFramework](https://github.com/praydog/REFramework-nightly/releases)
@@ -38,7 +40,8 @@ Copy the `.lua` files into `<RE4 game folder>\reframework\autorun\`. Settings: p
   The HUD is drawn from Minecraft's own images (hotbar, hearts, hunger, armor, XP bar) and font, and item
   icons are the real Minecraft textures, all sent by the Minecraft mod. RE4's own UI is hidden while
   Leon is in the game (**F8** shows it again).
-- `minecraft_first_person.lua`: Minecraft's first-person camera (toggle with **F5**): a steady eye height above
+- `minecraft_first_person.lua`: Minecraft's first-person camera (toggle with **F5**), with all of Leon hidden
+  (body, head, hair, weapons) so only Minecraft's hand shows: a steady eye height above
   Leon's feet (1.62 m, 1.27 m sneaking), turned only by the raw mouse (read by the overlay plugin) with
   Minecraft's sensitivity formula and your Minecraft sensitivity setting. Draws a `+` crosshair only when
   Minecraft isn't drawing its own.

@@ -14,7 +14,7 @@ local settings = {
     sneak_eye_height = 1.27,
     forward_offset = 0.10,  -- meters in front of the eye/head position
     up_offset = 0.05,       -- only for the head bone camera
-    hide_head = true,       -- switches off Leon's head/hair/face meshes (never shrinks bones)
+    hide_head = true,       -- hides all of Leon (body, separate head, hair, weapons): like Minecraft, you only see its hand
     crosshair = true,
     stage = 1,              -- index into STAGES
     show_debug = false,
@@ -43,7 +43,7 @@ local debug = {
 local head_joint = nil
 local head_joint_owner = nil
 local head_hidden = false
-local hidden_meshes = {}
+local hidden_renderers = {}     -- address -> component we switched off to hide Leon
 local f5_was_down = false
 
 local mesh_type = sdk.typeof("via.render.Mesh")
@@ -107,7 +107,7 @@ local function get_head_joint()
         head_joint = find_head_joint(transform)
         head_joint_owner = transform
         head_hidden = false
-        hidden_meshes = {}
+        hidden_renderers = {}
     end
     return head_joint, transform
 end
@@ -115,7 +115,7 @@ end
 -- Calls fn(game_object, name, depth) for every child object under transform
 local function for_each_child(transform, fn, depth)
     depth = depth or 1
-    if depth > 4 then return end
+    if depth > 6 then return end
     local child = try_call(transform, "get_Child")
     while child ~= nil do
         local go = try_call(child, "get_GameObject")
@@ -134,28 +134,66 @@ local function is_head_part(name)
     return false
 end
 
--- Hides the head by switching off head/hair/face meshes.
+-- Hides all of Leon in first person by switching off every mesh/hair renderer on his body, his
+-- separate head object (hair, face) and everything attached to them (weapons, gear).
 -- (Shrinking the head joint to ~0 was removed: it can hang the GPU.)
-local function set_head_hidden(hidden, transform)
-    if head_joint == nil or hidden == head_hidden then return end
+local last_hide_scan = -1000
+local hide_frame = 0
 
-    if hidden and transform ~= nil then
-        for_each_child(transform, function(go, name)
-            if go ~= nil and is_head_part(name) then
-                local mesh = try_call(go, "getComponent(System.Type)", mesh_type)
-                if mesh ~= nil then
-                    try_call(mesh, "set_Enabled", false)
-                    table.insert(hidden_meshes, mesh)
+local function is_renderer(component)
+    local ok, name = pcall(function() return component:get_type_definition():get_full_name() end)
+    if not ok or name == nil or name:sub(1, 11) ~= "via.render." then return false end
+    return name:find("Mesh") ~= nil or name:find("Hair") ~= nil or name:find("Strand") ~= nil
+end
+
+local function hide_renderers_of(go)
+    local components = try_call(go, "get_Components")
+    local ok, list = pcall(function() return components:get_elements() end)
+    if not ok or list == nil then return end
+    for _, component in ipairs(list) do
+        if is_renderer(component) then
+            local ok_addr, address = pcall(function() return component:get_address() end)
+            local key = ok_addr and address or tostring(component)
+            if hidden_renderers[key] == nil then
+                try_call(component, "set_Enabled", false)
+                hidden_renderers[key] = component
+            end
+        end
+    end
+end
+
+local function leon_objects()
+    local cm = sdk.get_managed_singleton(sdk.game_namespace("CharacterManager"))
+    local ctx = cm and try_call(cm, "getPlayerContextRef")
+    if ctx == nil then return {} end
+    local objects = {}
+    for _, method in ipairs({ "get_BodyGameObject", "get_HeadGameObject" }) do
+        local go = try_call(ctx, method)
+        if go ~= nil then table.insert(objects, go) end
+    end
+    return objects
+end
+
+local function set_head_hidden(hidden, transform)
+    hide_frame = hide_frame + 1
+    if hidden then
+        -- Rescan now and then: weapons and gear get attached and swapped during play
+        if not head_hidden or hide_frame - last_hide_scan >= 120 then
+            last_hide_scan = hide_frame
+            for _, go in ipairs(leon_objects()) do
+                hide_renderers_of(go)
+                local t = try_call(go, "get_Transform")
+                if t ~= nil then
+                    for_each_child(t, function(child) if child ~= nil then hide_renderers_of(child) end end)
                 end
             end
-        end)
-    elseif not hidden then
-        for _, mesh in ipairs(hidden_meshes) do
-            try_call(mesh, "set_Enabled", true)
         end
-        hidden_meshes = {}
+    elseif head_hidden then
+        for _, component in pairs(hidden_renderers) do
+            try_call(component, "set_Enabled", true)
+        end
+        hidden_renderers = {}
     end
-
     head_hidden = hidden
 end
 
@@ -413,7 +451,7 @@ re.on_draw_ui(function()
         changed, settings.first_person = imgui.checkbox("First person (F5)", settings.first_person)
         changed, settings.minecraft_camera = imgui.checkbox("Minecraft camera (eye height + mouse look)", settings.minecraft_camera)
         changed, settings.eye_height = imgui.slider_float("Eye height", settings.eye_height, 1.2, 2.0)
-        changed, settings.hide_head = imgui.checkbox("Hide Leon's head", settings.hide_head)
+        changed, settings.hide_head = imgui.checkbox("Hide Leon's body (first person)", settings.hide_head)
         changed, settings.crosshair = imgui.checkbox("Crosshair", settings.crosshair)
         changed, settings.forward_offset = imgui.slider_float("Forward offset", settings.forward_offset, -0.5, 0.5)
         changed, settings.up_offset = imgui.slider_float("Up offset", settings.up_offset, -0.3, 0.3)
