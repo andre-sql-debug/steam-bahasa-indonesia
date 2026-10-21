@@ -91,6 +91,11 @@ public class Re4Bridge implements ClientModInitializer {
     private static int lastInputSelected = -1;
     private static int lastInputSwings = -1;
     private static int lastInputUses = -1;
+    // RE4's hits on Leon: total RE4 damage seen so far (to apply only what's new), and RE4 killing Leon
+    private static double lastLeonDamage = -1;
+    private static boolean leonDeadSeen = false;
+    // A Leon hit RE4 counts as Leon's full health costs this many Minecraft half-hearts (a whole Minecraft life)
+    private static final float LEON_FULL_HEALTH_AS_MC = 20.0F;
     private static int lastInputPerspective = -1;
 
     // Brightness of Minecraft's mobs and character in RE4 (RE4's scenes are darker than Minecraft's sky)
@@ -158,6 +163,11 @@ public class Re4Bridge implements ClientModInitializer {
     private static final java.util.LinkedHashSet<Integer> seenArrows = new java.util.LinkedHashSet<>();
     // Minecraft's player is moved this high when anchored, above anything in its own world
     private static final double ANCHOR_Y = 250.0;
+    // RE4 stopped (closed, crashed, scripts off) while the player stands up at the anchor: hold it there for this
+    // long (RE4 may come back), then put it on the ground at the world spawn (it would fall hundreds of blocks)
+    private static final long RE4_GONE_HOLD_MS = 10_000;
+    private static long lastControlMs = 0;
+    private static Vec3 heldAt = null;
 
     // Minecraft's own HUD images (1.21 sprite names) and its pixel font, so RE4 can draw the exact same UI
     private static final String[] GUI_IMAGES = {
@@ -380,6 +390,7 @@ public class Re4Bridge implements ClientModInitializer {
         mc.options.pauseOnLostFocus = false;
         ticks++;
         Re4Native.readStatus();   // real RE4 mobs: switched on from RE4, and which parts RE4 has
+        holdWhenRe4Gone(mc);
 
         try {
             if (mc.player != null) {
@@ -429,6 +440,46 @@ public class Re4Bridge implements ClientModInitializer {
         }
     }
 
+    // What RE4 did to Leon happens to Minecraft's player: the same share of its health, and death
+    private static void applyLeonDamage(Minecraft mc, JsonObject input, boolean firstRead) {
+        if (input.has("leon_damage") && input.has("leon_max")) {
+            double total = input.get("leon_damage").getAsDouble();
+            double max = input.get("leon_max").getAsDouble();
+            // The first number seen (or a lower one: RE4's script reloaded) is only a starting point
+            if (!firstRead && lastLeonDamage >= 0 && total > lastLeonDamage && max > 0 && Double.isFinite(total)) {
+                float damage = (float) Math.min(LEON_FULL_HEALTH_AS_MC, (total - lastLeonDamage) / max * LEON_FULL_HEALTH_AS_MC);
+                hurtPlayer(mc, damage, false);
+            }
+            lastLeonDamage = total;
+        }
+        boolean leonDead = input.has("leon_dead") && input.get("leon_dead").getAsBoolean();
+        if (leonDead && !leonDeadSeen && !firstRead) {
+            hurtPlayer(mc, 0.0F, true);   // RE4 killed Leon (a grab, a fall, a chainsaw): Minecraft's player dies too
+        }
+        leonDeadSeen = leonDead;
+    }
+
+    private static void hurtPlayer(Minecraft mc, float damage, boolean kill) {
+        var server = mc.getSingleplayerServer();
+        LocalPlayer local = mc.player;
+        if (server == null || local == null) {
+            return;
+        }
+        var uuid = local.getUUID();
+        server.execute(() -> {
+            ServerPlayer player = server.getPlayerList().getPlayer(uuid);
+            if (player == null || player.isCreative() || player.isSpectator() || !player.isAlive()) {
+                return;   // Creative and spectator players can't be hurt, as in Minecraft
+            }
+            if (kill) {
+                player.hurt(player.damageSources().genericKill(), Float.MAX_VALUE);
+            } else if (damage > 0.0F) {
+                // no knockback: RE4 already pushes Leon (and so the player) around
+                player.hurt(player.damageSources().generic(), damage);
+            }
+        });
+    }
+
     private static void applyInput(Minecraft mc) {
         LocalPlayer player = mc.player;
         if (player == null || !isFresh(inputFile)) {
@@ -467,6 +518,7 @@ public class Re4Bridge implements ClientModInitializer {
                     characterBrightness = Math.max(0.1F, Math.min(1.0F, b));
                 }
             }
+            applyLeonDamage(mc, input, firstRead);
             remoteYaw = input.has("yaw") ? finiteOrNull(input.get("yaw").getAsFloat()) : null;
             remotePitch = input.has("pitch") ? finiteOrNull(input.get("pitch").getAsFloat()) : null;
             if (remotePitch != null) {
@@ -549,6 +601,49 @@ public class Re4Bridge implements ClientModInitializer {
                 }
             });
         }
+    }
+
+    private static void holdWhenRe4Gone(Minecraft mc) {
+        LocalPlayer player = mc.player;
+        long now = System.currentTimeMillis();
+        if (player == null || remoteKeys() != null) {
+            lastControlMs = now;
+            heldAt = null;
+            return;
+        }
+        boolean atAnchor = Re4Terrain.anchorEpoch() != 0 && Math.abs(player.getY() - ANCHOR_Y) < 70.0;
+        if (!atAnchor || player.isSpectator()) {
+            heldAt = null;
+            return;
+        }
+        if (heldAt == null) {
+            heldAt = player.position();
+        }
+        if (now - lastControlMs < RE4_GONE_HOLD_MS) {
+            player.setPos(heldAt.x, heldAt.y, heldAt.z);
+            player.setDeltaMovement(Vec3.ZERO);
+            player.resetFallDistance();
+            return;
+        }
+        heldAt = null;
+        lastControlMs = now;   // once
+        var server = mc.getSingleplayerServer();
+        if (server == null) {
+            return;
+        }
+        var uuid = player.getUUID();
+        server.execute(() -> {
+            ServerPlayer serverPlayer = server.getPlayerList().getPlayer(uuid);
+            if (serverPlayer == null) {
+                return;
+            }
+            net.minecraft.server.level.ServerLevel level = serverPlayer.serverLevel();
+            BlockPos spawn = level.getSharedSpawnPos();
+            int y = level.getHeight(net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, spawn.getX(), spawn.getZ());
+            serverPlayer.teleportTo(spawn.getX() + 0.5, y, spawn.getZ() + 0.5);
+            serverPlayer.resetFallDistance();
+        });
+        LOGGER.info("RE4 Bridge: RE4 stopped; moved the player from the RE4 meeting point to the world spawn");
     }
 
     // RE4's terrain: new anchors on request, new terrain snapshots as they arrive
@@ -788,6 +883,7 @@ public class Re4Bridge implements ClientModInitializer {
 
         LocalPlayer player = mc.player;
         state.addProperty("in_world", player != null);
+        state.addProperty("dead", player != null && player.isDeadOrDying());
         if (player == null) {
             return state;
         }

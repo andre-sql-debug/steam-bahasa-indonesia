@@ -854,6 +854,19 @@ local function update_input()
     end
     -- A Minecraft screen is open and gets RE4's keys and mouse (through the overlay plugin): tell the other
     -- scripts, and send no movement or clicks of our own
+    -- RE4's hits on Leon (total RE4 damage so far, Leon's max health) and whether RE4 killed Leon
+    local c = MinecraftRE4Control
+    if type(c) == "table" and type(c.leon_damage) == "table" then
+        if input.leon_damage ~= c.leon_damage.total or input.leon_max ~= c.leon_damage.max then
+            input.leon_damage = c.leon_damage.total
+            input.leon_max = c.leon_damage.max
+            changed = true
+        end
+        if input.leon_dead ~= (c.leon_dead == true) then
+            input.leon_dead = c.leon_dead == true
+            changed = true
+        end
+    end
     read_plugin_mouse()
     local minecraft_screen = data ~= nil and data.screen_open == true and not turn and plugin_mouse_alive()
     if type(MinecraftRE4Control) == "table" then MinecraftRE4Control.minecraft_screen = minecraft_screen end

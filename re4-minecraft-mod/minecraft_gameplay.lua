@@ -22,7 +22,8 @@ local settings = {
     combat = true,
     enemies_look_at_mobs = true,
     flinch = true,          -- enemies react to Minecraft hits (once the Flinch test found a way that works)
-    no_damage = true,
+    no_damage = true,       -- Leon keeps full health: RE4's hits go to your Minecraft hearts instead
+    share_death = true,     -- Minecraft's player dying kills Leon, and RE4 killing Leon kills Minecraft's player
     swap_left_right = false,
     fly_speed = 10.9,       -- m/s, only without Minecraft
     show_debug = false,
@@ -513,6 +514,32 @@ end
 -- No damage
 ------------------------------------------------------------------------------
 
+-- What RE4 does to Leon goes to your Minecraft hearts (shared with minecraft_bridge_hud.lua, which sends it):
+-- Leon is kept at full health, and every hit's damage (RE4 hit points) is added up for Minecraft. Deaths are
+-- shared: Minecraft's player dying kills Leon (RE4's game over), RE4 killing Leon kills Minecraft's player.
+local leon_damage = { total = 0, max = nil }
+local leon_death = { requested = false, reported = false }
+
+local function share_leon_state(player)
+    local c = MinecraftRE4Control
+    if type(c) ~= "table" then return end
+    c.leon_damage = { total = leon_damage.total, max = leon_damage.max }
+    local hp = try_call(player.ctx, "get_HitPoint")
+    local live = hp and try_call(hp, "get_IsLive")
+    c.leon_dead = live == false
+end
+
+-- Minecraft's player died: Leon dies too, once (RE4's own death call)
+local function kill_leon_for_minecraft(player)
+    if leon_death.requested then return end
+    leon_death.requested = true
+    local hp = try_call(player.ctx, "get_HitPoint")
+    if hp == nil then return end
+    try_call(hp, "set_CurrentHitPoint", 0)
+    pcall(function() hp:call("dead") end)
+    debug.damage = "Minecraft's player died: Leon too"
+end
+
 local function keep_full_health(player)
     local hp = try_call(player.ctx, "get_HitPoint")
     local max = hp and try_call(hp, "get_DefaultHitPoint")
@@ -521,7 +548,16 @@ local function keep_full_health(player)
         debug.damage = "HP not found"
         return
     end
+    leon_damage.max = max
+    -- Minecraft's player is dead: don't heal Leon (he is dying with it)
+    if leon_death.requested then return end
+    -- 0 HP: RE4 itself killed Leon (a grab, a fall, a boss): let it happen (Minecraft's player dies with him)
+    if current <= 0 then
+        debug.damage = "Leon died in RE4"
+        return
+    end
     if current < max then
+        leon_damage.total = leon_damage.total + (max - current)
         try_call(hp, "set_CurrentHitPoint", max)
         if (try_call(hp, "get_CurrentHitPoint") or 0) < max then
             pcall(function() hp:set_field("<CurrentHitPoint>k__BackingField", max) end)
@@ -1358,7 +1394,17 @@ re.on_pre_application_entry("UpdatePhysicsCharacterController", function()
     local dt = get_delta_time(player)
     state.time = state.time + dt
 
-    if settings.no_damage then keep_full_health(player) end
+    if settings.no_damage then
+        -- Minecraft's player died (and RE4 shares deaths): Leon dies too; once both live again, reset
+        local scene = type(MinecraftRE4Control) == "table" and MinecraftRE4Control.mode == "re4"
+        if bridge ~= nil and bridge.dead == true and settings.share_death and not scene then
+            kill_leon_for_minecraft(player)   -- (after a cutscene ends, never in the middle of one)
+        elseif bridge ~= nil and bridge.dead == false then
+            leon_death.requested = false
+        end
+        keep_full_health(player)
+    end
+    share_leon_state(player)
     local control = MinecraftRE4Control
     local re4_has_leon = type(control) == "table" and control.mode ~= "minecraft"
 
@@ -1428,7 +1474,8 @@ re.on_draw_ui(function()
         changed, settings.enemies_look_at_mobs = imgui.checkbox("Enemies look at the Minecraft mobs fighting them", settings.enemies_look_at_mobs)
         changed, settings.flinch = imgui.checkbox("Enemies flinch at Minecraft hits", settings.flinch)
         imgui.text("  Flinch: " .. HIT.status)
-        changed, settings.no_damage = imgui.checkbox("No damage", settings.no_damage)
+        changed, settings.no_damage = imgui.checkbox("RE4's hits cost Minecraft hearts (Leon keeps full health)", settings.no_damage)
+        changed, settings.share_death = imgui.checkbox("Shared death (Minecraft and Leon die together)", settings.share_death)
         changed, settings.swap_left_right = imgui.checkbox("Swap left/right (if A and D are backwards)", settings.swap_left_right)
         changed, settings.fly_speed = imgui.slider_float("Fly speed without Minecraft (m/s)", settings.fly_speed, 2.0, 40.0)
         imgui.text("Mode: " .. debug.mode)
