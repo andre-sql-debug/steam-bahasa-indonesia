@@ -34,6 +34,8 @@ LUA_SUITES = [
     ("lua: enemies look at mobs", [os.path.join(HERE, "lua", "attention", "harness.py"), os.path.join(REPO, "minecraft_gameplay.lua")],
      r"\d+ passed, (\d+) failed"),
     ("lua: one Minecraft menu, saved settings", [os.path.join(HERE, "lua", "menu", "harness.py"), REPO], r"FAILS (\d+)"),
+    ("lua: flinch test and Minecraft hits", [os.path.join(HERE, "lua", "hit", "harness_diag.py")], r"\d+ passed, (\d+) failed"),
+    ("lua: attack test, enemies swing at mobs", [os.path.join(HERE, "lua", "hit", "test_attacks.py")], r"FAILS (\d+)"),
 ]
 
 

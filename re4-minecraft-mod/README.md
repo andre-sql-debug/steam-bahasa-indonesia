@@ -37,7 +37,11 @@ up close too. Damage is Minecraft's: a fist does 1, a diamond sword 7 (a normal 
 (up to the Wither's 300) than normal enemies (a zombie's 20). RE4's enemies fight back: a mob attacking one
 within its reach takes a blow (2 hearts) about once a second, so a golem wins fights but not forever. An RE4
 enemy that a Minecraft mob is fighting looks at that mob (RE4's own look-at for enemies), and looks back at
-Leon when the fight ends (setting: **Enemies look at the Minecraft mobs fighting them**).
+Leon when the fight ends (setting: **Enemies look at the Minecraft mobs fighting them**). Once
+**Minecraft Diagnostics → Attack test** found how to start an enemy's own attacks (saved in
+`reframework\data\minecraft_attack.json`), an enemy within reach of its mob turns to it and swings with one of
+its own attacks, at most every 2.5 s, never while it reels from a hit or during RE4's scenes (setting:
+**Enemies swing at the Minecraft mobs fighting them**).
 Minecraft hits (yours and your mobs') can make RE4 enemies flinch through RE4's own hit code: the mod builds
 the same kind of hit RE4 builds for Leon's knife and hands it to the enemy. Which way of building it works is
 found once by **Minecraft Diagnostics → Flinch test** and saved (`reframework\data\minecraft_flinch.json`);
