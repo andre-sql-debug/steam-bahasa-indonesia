@@ -685,6 +685,7 @@ local live_results = {}
 local LOOK_BASE_FRAMES, LOOK_FRAMES = 45, 90
 local WALK_BASE_FRAMES, WALK_FRAMES = 60, 180
 local FLINCH_BASE_FRAMES, FLINCH_FRAMES = 45, 90
+local ATTACK_FRAMES, ATTACK_ASK_FRAME = 80, 20
 local FLINCH_SETTLE_FRAMES = 90    -- before each hit, wait at most this long for the last reaction to end
 local FLINCH_REACT_FRAMES = 12     -- a reaction starts within this many frames of the hit
 
@@ -815,6 +816,39 @@ local function start_live(kind)
             live.per = {}
             r.methods = live.methods
             r.real_hit_seen = H.template ~= nil
+        end
+    elseif kind == "attack" then
+        -- Can an enemy be told to start one of its own attacks (so it can swing at a Minecraft mob)? The attack
+        -- states enemies were seen in this session are asked for, one after the other.
+        local body = try_call(enemy, "get_BodyGameObject")
+        live.fsm = body and fsm_type and try_call(body, "getComponent(System.Type)", fsm_type)
+        local td = sdk.find_type_definition("via.behaviortree.SetNodeInfo")
+        local okv, isvalue = pcall(function() return td:is_value_type() end)
+        if td ~= nil then
+            live.info = (okv and isvalue) and ValueType.new(td) or sdk.create_instance("via.behaviortree.SetNodeInfo")
+        end
+        r.seen_attack_states = {}
+        live.nodes = {}
+        for name in pairs(states_seen) do
+            if name:lower():find("attack", 1, true) and not flinch_damage_like(name) then
+                r.seen_attack_states[#r.seen_attack_states + 1] = name
+                if live.fsm ~= nil and try_call(live.fsm, "hasNodeFullName(System.String)", name) == true then
+                    live.nodes[#live.nodes + 1] = name
+                end
+            end
+        end
+        table.sort(live.nodes)
+        while #live.nodes > 3 do table.remove(live.nodes) end
+        r.candidates = live.nodes
+        live.per = {}
+        if live.fsm == nil then
+            r.result = "the enemy has no MotionFsm2"
+        elseif live.info == nil then
+            r.result = "via.behaviortree.SetNodeInfo can't be made"
+        elseif #live.nodes == 0 then
+            r.result = #r.seen_attack_states == 0
+                and "no attack seen yet: let an enemy attack Leon once (F7), then run this again"
+                or "this enemy has none of the attack states seen (try it on the enemy that attacked)"
         end
     end
     if r.result ~= nil then
@@ -1026,6 +1060,37 @@ local function step_live()
             if by ~= nil then by.hp_taken = math.max(by.hp_taken or 0, t.max - now) end
             try_call(hp, "set_CurrentHitPoint", t.max)
         end
+    elseif t.kind == "attack" then
+        -- Each attack state: 20 frames as it is, then asked for; did the enemy go into it (within 10 frames)?
+        local idx, fi = (t.frame - 1) // ATTACK_FRAMES + 1, (t.frame - 1) % ATTACK_FRAMES
+        if idx > #t.nodes then
+            local started = {}
+            for _, p in ipairs(t.per) do if p.started then started[#started + 1] = p.node end end
+            t.result.per_state = t.per
+            t.result.result = #started > 0
+                and ("the enemy started the asked-for attack (" .. started[1] .. "): enemies can be made to swing at mobs")
+                or "the enemy did not start the asked-for attacks"
+            finish_live()
+            return
+        end
+        local cur = t.per[idx]
+        local now = try_call(t.fsm, "getCurrentNodeName", 0)
+        if fi == 0 then
+            cur = { node = t.nodes[idx], before = now, changes = {} }
+            t.per[idx] = cur
+        elseif fi == ATTACK_ASK_FRAME then
+            local ok, err = pcall(function()
+                t.fsm:call("setCurrentNode(System.String, System.UInt32, via.behaviortree.SetNodeInfo)", cur.node, 0, t.info)
+            end)
+            cur.call = ok and "called" or ("failed: " .. tostring(err))
+        end
+        if fi > 0 and now ~= cur.last then
+            cur.changes[#cur.changes + 1] = string.format("[%d] %s", fi, tostring(now))
+            if fi > ATTACK_ASK_FRAME and fi <= ATTACK_ASK_FRAME + 10 and now == cur.node and cur.before ~= cur.node then
+                cur.started = true
+            end
+        end
+        cur.last = now
     end
 end
 
@@ -1045,7 +1110,7 @@ re.on_pre_application_entry("UpdateBehavior", function()
         if k == "spawn_cube" or k == "spawn_statue" or k == "spawn_light" or k == "remove_spawned" then
             local ok, e = pcall(spawn_test, k)
             if not ok then log("spawn test error: " .. tostring(e)) end
-        elseif k == "look" or k == "walk" or k == "flinch" then
+        elseif k == "look" or k == "walk" or k == "flinch" or k == "attack" then
             local ok, e = pcall(start_live, k)
             if not ok then log("live test error: " .. tostring(e)); live = nil end
         else
@@ -1531,6 +1596,8 @@ local function draw_ui()
         if imgui.button("Walk test") then pending_test = "walk" end
         imgui.same_line()
         if imgui.button("Flinch test") then pending_test = "flinch" end
+        imgui.same_line()
+        if imgui.button("Attack test") then pending_test = "attack" end
         local H = MinecraftRE4Hit
         imgui.text("  Flinch: " .. (type(H) == "table" and tostring(H.status) or "minecraft_gameplay.lua not running"))
         imgui.text((type(H) == "table" and H.template ~= nil) and "  (a real RE4 hit was seen: the test also copies it)"

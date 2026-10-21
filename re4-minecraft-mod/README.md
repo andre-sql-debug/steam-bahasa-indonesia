@@ -132,15 +132,19 @@ Copy the `.lua` files into `<RE4 game folder>\reframework\autorun\`. Settings: p
 - `minecraft_cutscenes.lua`: your Minecraft character in cutscenes (see above).
 - `minecraft_diagnostics.lua`: writes `reframework\data\minecraft_diagnostics.json` after a minute of play
   (or **Save report now**): which RE4 methods the mod uses exist, Leon's joints, nearby enemies and their
-  health state, who had Leon how often, frame rate, how RE4's enemies pick targets and what RE4 offers for
-  adding objects to its world. **Record real hits** logs which RE4 functions run when RE4 itself hits an
-  enemy. RE4's own hits on enemies are captured all the time (what the hit carries, and the enemy's
-  behavior states right after: its damage reactions). **Live tests** (Look, Walk, Flinch) try RE4's own
-  functions on the nearest enemy for a few seconds and measure by themselves whether the enemy looked at a
-  point, walked to it, or reacted to a Minecraft-style hit (a working way is saved and switched on); the
-  report saves itself after each. **Spawn test cube / enemy-model copy** create real RE4 objects in front of
-  Leon, to see whether RE4 lights, shadows and hides them like its own (the way to make Minecraft's mobs real
-  RE4 objects). Send that file (and `re2_framework_log.txt`, Minecraft's `logs\latest.log`) when reporting a problem.
+  health state, who had Leon how often and every handover with its reason (a timeline), frame rate, how
+  RE4's enemies pick targets, what RE4 says about the chapter and area, how the real RE4 mobs loaded, and
+  what RE4 offers for adding objects to its world. **Record real hits** logs which RE4 functions run when
+  RE4 itself hits an enemy, and in which order. RE4's own hits on enemies are captured all the time (what the
+  hit carries, and the enemy's behavior states right after: its damage reactions). **Live tests** (Look,
+  Walk, Flinch, Attack) try RE4's own functions on the nearest enemy for a few seconds and measure by
+  themselves whether the enemy looked at a point, walked to it, went into a damage reaction from a
+  Minecraft-style hit (every working way is saved and switched on; how much health RE4's hit code took is
+  written down), or started one of its own attacks on request (the way to make enemies swing at mobs); the
+  report saves itself after each. **Spawn test cube / enemy-model copy / light** create real RE4 objects in
+  front of Leon, to see whether RE4 lights, shadows and hides them like its own (the way to make Minecraft's
+  mobs and torches real RE4 objects). **Make support zip** in the Minecraft menu collects this report with
+  everything else needed when reporting a problem.
 - `minecraft_terrain.lua`: terrain mode (see above). Scans a 10 m radius around Leon in 0.5 m cells and
   places Leon where Minecraft's player is, facing where you look (so RE4's **F** interacts with what you
   look at). Sends RE4's enemies near Leon to Minecraft. **F9** re-anchors the two worlds.
