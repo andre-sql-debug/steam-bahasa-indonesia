@@ -36,6 +36,8 @@ local state = {
     acked = {},           -- export ids with a working object
 }
 local debug = { status = "off", errors = {}, loaded = 0, failed = 0, shown = 0, pooled = 0 }
+-- For the diagnostics report (minecraft_diagnostics.lua): how loading and placing the parts went
+MinecraftRE4Native = { debug = debug, settings = settings, state = state }
 
 local function note_error(text)
     if #debug.errors < 12 then debug.errors[#debug.errors + 1] = text end

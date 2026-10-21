@@ -1436,6 +1436,12 @@ write_report = function()
         camera_components = camera_components(),
         game_progress = game_progress(),
         control_timeline = type(c) == "table" and c.timeline or nil,
+        real_mobs = type(MinecraftRE4Native) == "table" and {
+            enabled = MinecraftRE4Native.settings.enabled, status = MinecraftRE4Native.debug.status,
+            loaded = MinecraftRE4Native.debug.loaded, failed = MinecraftRE4Native.debug.failed,
+            shown = MinecraftRE4Native.debug.shown, kept = MinecraftRE4Native.debug.pooled,
+            errors = MinecraftRE4Native.debug.errors, quat_order = MinecraftRE4Native.state.quat_order,
+            session = MinecraftRE4Native.state.session } or "minecraft_native.lua not running",
         flinch = type(MinecraftRE4Hit) == "table" and { method = MinecraftRE4Hit.method, status = MinecraftRE4Hit.status }
             or "minecraft_gameplay.lua not running",
         hit_and_reaction_types = type_dumps(),
