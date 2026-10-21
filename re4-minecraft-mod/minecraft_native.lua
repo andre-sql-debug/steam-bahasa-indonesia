@@ -1,9 +1,10 @@
 -- Minecraft Real Mobs for RE4 Remake (REFramework Lua script) - experimental
--- Minecraft's mobs as real RE4 objects: RE4 itself draws them, so RE4's lights, shadows, fog and walls work on them
--- like on its own things (instead of a Minecraft picture laid over RE4's).
---  * The RE4 Bridge Minecraft mod writes each mob part (a few textured cuboids) as an RE4 model file with its
---    texture into <RE4>\natives\STM\minecraft\ (from Minecraft's own model and texture on this PC), and lists them in
---    reframework\data\minecraft_native_assets.json.
+-- Minecraft's mobs (your character in third person too) and the blocks you built as real RE4 objects: RE4 itself
+-- draws them, so RE4's lights, shadows, fog and walls work on them like on its own things (instead of a Minecraft
+-- picture laid over RE4's).
+--  * The RE4 Bridge Minecraft mod writes each mob part (a few textured cuboids) and each kind of block as an RE4
+--    model file with its texture into <RE4>\natives\STM\minecraft\ (from Minecraft's own model and texture on this
+--    PC), and lists them in reframework\data\minecraft_native_assets.json. A built block is a part too.
 --  * Every frame it writes where each part is (minecraft_native_poses.json); this script moves one real RE4 object
 --    per part there, and tells Minecraft which parts it shows (minecraft_native_status.json), so Minecraft stops
 --    drawing those over the picture.
@@ -212,16 +213,49 @@ local function make_quat(x, y, z, w)
     return Quaternion.new(x, y, z, w)
 end
 
+-- One part: "mob,export,px,py,pz,qx,qy,qz,qw,sx,sy,sz;" (the mob number is negative for a built block); the pose
+-- (the ten numbers) is kept as text
+local PART_PATTERN = "(%-?%d+),(%d+),([^,;]+,[^,;]+,[^,;]+,[^,;]+,[^,;]+,[^,;]+,[^,;]+,[^,;]+,[^,;]+,[^,;]+);"
+
+-- The ten numbers of a pose, or nil when one of them isn't a number
+local function pose_numbers(pose)
+    local v = {}
+    for n in pose:gmatch("[^,]+") do
+        local x = tonumber(n)
+        if x == nil then return nil end
+        v[#v + 1] = x
+    end
+    return v
+end
+
+-- Moves an object to a pose (v: its numbers), unless it is there already: hundreds of built blocks (and mobs
+-- standing still) then cost no calls into RE4 at all
+local function place(o, pose, v)
+    if o.pose == pose then return true end
+    o.pose = nil
+    local ok = pcall(function()
+        o.tr:call("set_Position", Vector3f.new(v[1], v[2], v[3]))
+        o.tr:call("set_Rotation", make_quat(v[4], v[5], v[6], v[7]))
+        o.tr:call("set_LocalScale", Vector3f.new(v[8], v[9], v[10]))
+    end)
+    if ok then o.pose = pose end
+    return ok
+end
+
 -- One snapshot from Minecraft: every part shown this frame. Parts not in it are hidden and kept for reuse.
 local function apply_poses(parts)
     local entries, present, count = {}, {}, {}
-    for mob, id, px, py, pz, qx, qy, qz, qw, sx, sy, sz in parts:gmatch(
-            "(%-?%d+),(%d+),([^,]+),([^,]+),([^,]+),([^,]+),([^,]+),([^,]+),([^,]+),([^,]+),([^,]+),([^;]+);") do
+    for mob, id, pose in parts:gmatch(PART_PATTERN) do
         local pair = mob .. ":" .. id
         count[pair] = (count[pair] or 0) + 1
         local key = pair .. ":" .. count[pair]
-        present[key] = true
-        entries[#entries + 1] = { key = key, id = id, values = { px, py, pz, qx, qy, qz, qw, sx, sy, sz } }
+        -- the numbers are read only for a pose that changed; one that isn't all numbers counts as not sent
+        local o, v = state.objects[key], nil
+        if o == nil or o.pose ~= pose then v = pose_numbers(pose) end
+        if v ~= nil or o ~= nil and o.pose == pose then
+            present[key] = true
+            entries[#entries + 1] = { key = key, id = id, pose = pose, v = v }
+        end
     end
     for key, o in pairs(state.objects) do
         if not present[key] then
@@ -240,13 +274,7 @@ local function apply_poses(parts)
             state.objects[e.key] = o
         end
         if o ~= nil then
-            local v = e.values
-            local ok = pcall(function()
-                o.tr:call("set_Position", Vector3f.new(tonumber(v[1]), tonumber(v[2]), tonumber(v[3])))
-                o.tr:call("set_Rotation", make_quat(tonumber(v[4]), tonumber(v[5]), tonumber(v[6]), tonumber(v[7])))
-                o.tr:call("set_LocalScale", Vector3f.new(tonumber(v[8]), tonumber(v[9]), tonumber(v[10])))
-            end)
-            if ok then
+            if place(o, e.pose, e.v) then
                 show(o, true)
                 shown = shown + 1
             else

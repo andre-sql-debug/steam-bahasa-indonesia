@@ -21,11 +21,13 @@ local ctx = obj({})
 local cm = obj({ getPlayerContextRef = function() if LEON then return ctx end return nil end })
 RESOURCES_OK = { ["minecraft/m_a.mesh"] = true, ["minecraft/t_a.mdf2"] = true, ["minecraft/m_b.mesh"] = true }
 CREATED, DESTROYED = 0, 0
+SETS = 0   -- calls that move an object (set_Position / set_Rotation / set_LocalScale)
 OBJECTS = {}
 local function make_go(name)
     local go
     local tr = { pos = nil, rot = nil, scale = nil }
-    tr = obj({ set_Position = function(p) tr.pos = p end, set_Rotation = function(q) tr.rot = q end, set_LocalScale = function(s) tr.scale = s end })
+    tr = obj({ set_Position = function(p) SETS = SETS + 1; tr.pos = p end, set_Rotation = function(q) SETS = SETS + 1; tr.rot = q end,
+               set_LocalScale = function(s) SETS = SETS + 1; tr.scale = s end })
     go = obj({ name = name, draw = true, [".ctor"] = function() end, get_Transform = function() return tr end,
         set_DrawSelf = function(b) go.draw = b end,
         ["createComponent(System.Type)"] = function(t)
@@ -97,6 +99,21 @@ check("position set", o1.tr.pos is not None and abs(o1.tr.pos.x - 1.0) < 1e-6 an
 o2 = G.OBJECTS[2]
 check("rotation passed in w,x,y,z order to Quaternion.new", abs(o2.tr.rot.w - 0.7071) < 1e-6 and abs(o2.tr.rot.y - 0.7071) < 1e-6, (o2.tr.rot.w, o2.tr.rot.x, o2.tr.rot.y, o2.tr.rot.z))
 check("mesh and material set", o1.mesh.m is not None and o1.mesh.mat is not None)
+# the same poses again: nothing is moved (no calls into RE4); a changed pose moves only that object
+G.SETS = 0
+FILES["minecraft_native_poses.json"] = json.dumps({"seq": 101, "session": 42, "parts": "7,1,1.0,2.0,3.0,0,0,0,1,1,1,1;7,1,1.5,2.5,3.5,0,0.7071,0,0.7071,1,1,1;8,2,0,0,0,0,0,0,1,1,1,1;"})
+frames(3)
+check("unchanged poses: no setter calls", G.SETS == 0, G.SETS)
+check("unchanged poses: objects still shown", o1.draw is True and o2.draw is True)
+FILES["minecraft_native_poses.json"] = json.dumps({"seq": 102, "session": 42, "parts": "7,1,1.25,2.0,3.0,0,0,0,1,1,1,1;7,1,1.5,2.5,3.5,0,0.7071,0,0.7071,1,1,1;8,2,0,0,0,0,0,0,1,1,1,1;"})
+frames(3)
+check("changed pose: one object moved (3 setter calls)", G.SETS == 3, G.SETS)
+check("changed pose applied", abs(o1.tr.pos.x - 1.25) < 1e-6, o1.tr.pos.x)
+G.SETS = 0
+FILES["minecraft_native_poses.json"] = json.dumps({"seq": 103, "session": 42, "parts": "7,1,1.0,2.0,3.0,0,0,0,1,1,1,1;7,1,1.5,2.5,3.5,0,0.7071,0,0.7071,1,1,1;8,2,0,0,0,0,0,0,1,1,1,1;"})
+frames(3)
+check("moved back: setter calls again", G.SETS == 3 and abs(o1.tr.pos.x - 1.0) < 1e-6, (G.SETS, o1.tr.pos.x))
+check("still two objects", G.CREATED == 2, G.CREATED)
 # parts stop coming
 FILES["minecraft_native_poses.json"] = json.dumps({"seq": 2, "session": 42, "parts": ""})
 frames(5)
@@ -106,6 +123,8 @@ FILES["minecraft_native_poses.json"] = json.dumps({"seq": 3, "session": 42, "par
 frames(2)
 check("pooled object reused (no new object)", G.CREATED == 2, G.CREATED)
 check("reused object shown again", any(o.draw for o in [o1, o2]))
+check("reused object moved to its new pose", any(o.draw and abs(o.tr.pos.x) < 1e-6 and abs(o.tr.pos.z) < 1e-6 for o in [o1, o2]),
+      [(o.draw, o.tr.pos.x, o.tr.pos.z) for o in [o1, o2]])
 # Leon goes away (loading): forget without touching
 G.LEON = False
 frames(5)
@@ -125,6 +144,7 @@ check("status says off after reset", st.get("enabled") is False, st)
 FILES["minecraft_native_assets.json"] = json.dumps({"exports": {"1": {"mesh": "minecraft/m_b.mesh", "material": "minecraft/t_a.mdf2"}}, "session": 43})
 FILES["minecraft_native_poses.json"] = json.dumps({"seq": 9, "session": 42, "parts": "9,1,0,0,0,0,0,0,1,1,1,1;"})
 L.execute('run("reset")')
+L.execute('CB = {}')   # like REFramework's script reset: the old copy of the script stops running
 L.execute(open(sys.argv[1]).read())
 frames(35)
 st = json.loads(FILES["minecraft_native_status.json"])
@@ -136,4 +156,46 @@ FILES["minecraft_native_poses.json"] = json.dumps({"seq": 10, "session": 43, "pa
 frames(3)
 newest = G.OBJECTS[len(G.OBJECTS)]
 check("new-session part uses the new mesh", newest.mesh.m is not None and newest.mesh.m.path == "minecraft/m_b.mesh", newest.mesh.m and newest.mesh.m.path)
+# Built blocks: parts with negative numbers (never an entity's), many of them standing still
+objects = G.MinecraftRE4Native.state.objects
+blocks = "".join(f"{-1 - i * 4096},1,{i}.0,5.0,7.0,0,0,0,1,1,1,1;" for i in range(50))
+blocks += "-9223372036854775808,1,60.0,5.0,7.0,0,0,0,1,1,1,1;-5,1,61.0,5.0,7.0,0,0,0,1,1,1,1;5,1,62.0,5.0,7.0,0,0,0,1,1,1,1;"
+before = G.CREATED
+FILES["minecraft_native_poses.json"] = json.dumps({"seq": 20, "session": 43, "parts": blocks})
+frames(3)
+check("negative ids: one object per block", G.CREATED - before == 52, G.CREATED - before)   # 53 parts, part "9" gone: its object reused
+b3 = objects["-12289:1:1"]
+check("negative id parsed and placed", b3 is not None and abs(b3.tr.pos.x - 3.0) < 1e-6 and abs(b3.tr.pos.z - 7.0) < 1e-6,
+      b3 and (b3.tr.pos.x, b3.tr.pos.z))
+lowest = objects["-9223372036854775808:1:1"]
+check("lowest 64-bit block number works", lowest is not None and abs(lowest.tr.pos.x - 60.0) < 1e-6)
+neg, pos = objects["-5:1:1"], objects["5:1:1"]
+check("-5 and 5 are different objects", neg is not None and pos is not None and neg.go != pos.go
+      and abs(neg.tr.pos.x - 61.0) < 1e-6 and abs(pos.tr.pos.x - 62.0) < 1e-6)
+G.SETS = 0
+FILES["minecraft_native_poses.json"] = json.dumps({"seq": 21, "session": 43, "parts": blocks})
+frames(3)
+check("53 standing blocks: no setter calls", G.SETS == 0, G.SETS)
+FILES["minecraft_native_poses.json"] = json.dumps({"seq": 22, "session": 43, "parts": blocks.replace("-12289,1,3.0,5.0,7.0", "-12289,1,3.0,6.0,7.0")})
+frames(3)
+check("one block changed: only it is moved", G.SETS == 3 and abs(b3.tr.pos.y - 6.0) < 1e-6, (G.SETS, b3.tr.pos.y))
+check("all blocks shown", G.MinecraftRE4Native.debug.shown == 53, G.MinecraftRE4Native.debug.shown)
+# a malformed part (a number missing) is skipped, the others still work
+before = G.CREATED
+FILES["minecraft_native_poses.json"] = json.dumps({"seq": 23, "session": 43, "parts": "-77,1,1.0,2.0,3.0,0,0,0,1,1,1;" + blocks})
+frames(3)
+check("malformed part ignored", objects["-77:1:1"] is None and G.MinecraftRE4Native.debug.shown == 53, G.MinecraftRE4Native.debug.shown)
+# a pose that isn't all numbers (NaN from Minecraft) counts as not sent: that object is hidden and kept, not moved
+G.SETS = 0
+FILES["minecraft_native_poses.json"] = json.dumps({"seq": 24, "session": 43, "parts": blocks.replace("-12289,1,3.0,5.0,7.0", "-12289,1,3.0,NaN,7.0")})
+frames(3)
+errors = list(G.MinecraftRE4Native.debug.errors.values())
+check("non-number pose: part hidden, nothing moved", b3.go.draw is False and G.SETS == 0 and abs(b3.tr.pos.y - 5.0) < 1e-6
+      and G.MinecraftRE4Native.debug.shown == 52, (b3.go.draw, G.SETS, b3.tr.pos.y, G.MinecraftRE4Native.debug.shown))
+check("non-number pose: no error", not any("could not move" in str(e) for e in errors), errors)
+before = G.CREATED
+FILES["minecraft_native_poses.json"] = json.dumps({"seq": 25, "session": 43, "parts": blocks})
+frames(3)
+check("back to numbers: shown again (kept object reused, no new one)", b3.go.draw is True and G.CREATED == before
+      and G.MinecraftRE4Native.debug.shown == 53, (b3.go.draw, G.CREATED - before, G.MinecraftRE4Native.debug.shown))
 print("FAILS", fails)

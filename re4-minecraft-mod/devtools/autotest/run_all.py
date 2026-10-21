@@ -77,12 +77,15 @@ def main():
                 results.append({"name": "minecraft starts", "passed": started, "details": {}})
                 if started:
                     re4 = FakeRE4(DATA, [os.path.join(REPO, "minecraft_control.lua"), os.path.join(REPO, "minecraft_terrain.lua")])
-                    # Minecraft connects, anchors, gets RE4's terrain and takes commands (not a fixed time: it varies)
+                    # Minecraft connects, anchors, gets RE4's terrain and takes commands (not a fixed time: it varies).
+                    # "Loading terrain" can stay up to 30 s (it waits for a world chunk drawn, and the overlay draws
+                    # none): typed commands would go to it, so wait until no screen is open
                     ready_by = time.time() + 60.0
                     while time.time() < ready_by:
                         re4.run_for(1.0)
                         b = re4.bridge()
-                        if b.get("in_world") and b.get("overlay") and (b.get("terrain_boxes") or 0) > 0 and b.get("authority"):
+                        if (b.get("in_world") and b.get("overlay") and (b.get("terrain_boxes") or 0) > 0 and b.get("authority")
+                                and b.get("screen_open") is False):
                             break
                     re4.run_for(3.0)
                     for sc in scenarios.ALL:

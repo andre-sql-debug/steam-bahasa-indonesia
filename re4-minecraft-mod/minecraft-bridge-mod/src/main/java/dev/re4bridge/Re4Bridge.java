@@ -891,6 +891,8 @@ public class Re4Bridge implements ClientModInitializer {
             return state;
         }
 
+        // The number your character's parts go by in minecraft_native_poses.json (real RE4 mobs)
+        state.addProperty("entity_id", player.getId());
         state.addProperty("health", player.getHealth());
         state.addProperty("max_health", player.getMaxHealth());
         state.addProperty("absorption", player.getAbsorptionAmount());

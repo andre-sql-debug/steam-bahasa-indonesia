@@ -44,6 +44,7 @@ import org.joml.Matrix4f;
 import org.joml.Matrix4fStack;
 
 import java.util.List;
+import java.util.Set;
 import org.lwjgl.opengl.GL11;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
@@ -172,6 +173,9 @@ public class LevelRendererMixin {
         MultiBufferSource.BufferSource buffers = this.renderBuffers.bufferSource();
         // Real RE4 mobs: the parts RE4 shows itself are captured instead of drawn (Re4Native)
         Re4Native.beginFrame(cam);
+        // Real RE4 blocks: the built blocks RE4 shows go into the depth only now, before the mobs, so a mob behind
+        // one is hidden like behind RE4's own walls
+        Set<BlockPos> re4Blocks = Re4Native.blocks(this.level, Re4Bridge.nearbyBlocks(), cam, poseStack);
         MultiBufferSource entityBuffers = Re4Native.wrap(buffers);
         for (Entity entity : this.level.entitiesForRendering()) {
             boolean self = entity == cameraEntity;
@@ -195,11 +199,12 @@ public class LevelRendererMixin {
             }
         }
         Re4Native.endFrame();
-        // The blocks you built (TNT, glass, chests...), with Minecraft's own models and textures
+        // The blocks you built (TNT, glass, chests...), with Minecraft's own models and textures (all but RE4's)
         BlockRenderDispatcher blockRenderer = Minecraft.getInstance().getBlockRenderer();
         for (BlockPos pos : Re4Bridge.nearbyBlocks()) {
             BlockState state = this.level.getBlockState(pos);
-            if (state.isAir() || state.getRenderShape() == RenderShape.INVISIBLE || pos.distToCenterSqr(cam) > RENDER_DISTANCE_SQR) {
+            if (state.isAir() || state.getRenderShape() == RenderShape.INVISIBLE || pos.distToCenterSqr(cam) > RENDER_DISTANCE_SQR
+                    || re4Blocks.contains(pos)) {
                 continue;
             }
             poseStack.pushPose();

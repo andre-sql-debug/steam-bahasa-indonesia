@@ -21,6 +21,8 @@ In RE4 press **Insert** → **Script Generated UI** → **Minecraft**. Everythin
 ## 4. Real RE4 mobs (3 min)
 - Tick **Real RE4 mobs (experimental)**. In Minecraft summon an iron golem near Leon (`/summon iron_golem`).
 - Look at it from all sides, walk around it, let it fight a villager. Screenshot.
+- Build a small wall (stone, planks, plain glass) and switch to third person: are the wall and
+  your character lit and shadowed like RE4's things? Does the golem behind the wall disappear behind it? Screenshot.
 - The **Minecraft Real Mobs** section shows parts loaded/failed and any errors. If it says RE4 can't open
   the files, the Loose File Loader is off: close RE4, run `install.bat` again.
 - If anything looks wrong or RE4 misbehaves, untick it again.

@@ -57,8 +57,13 @@ Minecraft into Skyrim). The Minecraft mod turns each body part it draws (its mod
 own file formats (`.mesh`, `.tex`, `.mdf2`) in `natives\STM\minecraft`, once per part; every frame it sends
 each part's position, rotation and size, `minecraft_native.lua` places RE4 objects with those models there,
 and Minecraft stops drawing the parts RE4 shows (it still draws a part while the mob flashes red after a
-hit, and anything RE4 can't show). Pixel-art textures are scaled up sharply, and see-through pixels are cut
-out. Needs REFramework's **Loose File Loader** (`install.bat` turns it on).
+hit, and anything RE4 can't show). Your own character in third person (F5) and in cutscenes goes the same way,
+with your skin (its see-through outer layer cut out). The blocks you built do too: each kind of block is
+written once with its own few textures (cut from Minecraft's block textures, not the whole sheet), and RE4
+places one object per block, up to the 400 nearest; Minecraft keeps drawing only what RE4 doesn't show:
+blocks Minecraft colours by biome (grass, leaves, vines), see-through ones (stained glass, ice, slime) and
+blocks drawn by their own code (chests, banners). Pixel-art textures are scaled up sharply, and see-through
+pixels are cut out. Needs REFramework's **Loose File Loader** (`install.bat` turns it on).
 
 **Hearts and death**: RE4's hits on Leon cost the Minecraft player hearts (Leon keeps full health in RE4),
 and when either dies the other does too (settings: **RE4's hits cost Minecraft hearts**, **Shared death**).
@@ -157,7 +162,8 @@ Copy the `.lua` files into `<RE4 game folder>\reframework\autorun\`. Settings: p
   Creative flying) to Leon and applies Minecraft's attack damage (cooldown, crits) to the enemy in front of
   you. Without Minecraft it falls back to built-in Minecraft movement numbers. Also: hearts and shared
   death (see above), flinching, and enemies looking at the mobs fighting them.
-- `minecraft_native.lua`: real RE4 mobs (see above). Status and errors: Script Generated UI → Minecraft Real Mobs.
+- `minecraft_native.lua`: real RE4 mobs, your character and built blocks (see above). Status and errors: Script
+  Generated UI → Minecraft Real Mobs.
 - `minecraft_blocks.lua`: shows the blocks you build in Minecraft as 3D cubes in RE4. **Right-click** places
   (Minecraft's own "use"), **left-click** breaks (Minecraft's mining). Minecraft's player looks where Leon
   looks, and is pulled back next to Leon when RE4 walls stop him. **F9** re-anchors the two worlds.

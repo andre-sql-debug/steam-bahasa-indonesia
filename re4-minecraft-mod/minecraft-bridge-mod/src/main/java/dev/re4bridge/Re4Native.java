@@ -12,11 +12,30 @@ import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.model.geom.ModelPart;
+import net.minecraft.client.renderer.ItemBlockRenderTypes;
+import net.minecraft.client.renderer.LightTexture;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
+import net.minecraft.client.renderer.Sheets;
+import net.minecraft.client.renderer.block.BlockRenderDispatcher;
+import net.minecraft.client.renderer.block.model.BakedQuad;
+import net.minecraft.client.renderer.texture.MissingTextureAtlasSprite;
+import net.minecraft.client.renderer.texture.OverlayTexture;
+import net.minecraft.client.renderer.texture.TextureAtlasSprite;
+import net.minecraft.client.resources.model.BakedModel;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.core.Vec3i;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.packs.resources.Resource;
+import net.minecraft.util.Mth;
+import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.inventory.InventoryMenu;
+import net.minecraft.world.level.BlockGetter;
+import net.minecraft.world.level.block.RenderShape;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix3f;
 import org.joml.Matrix4f;
@@ -25,6 +44,8 @@ import org.joml.Vector3f;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.ref.WeakReference;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -32,6 +53,7 @@ import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
@@ -55,12 +77,18 @@ import java.util.regex.Pattern;
  * parts' positions and rotations are captured (ModelPartMixin) and sent to RE4, which moves a real RE4 object per part:
  * RE4 then lights, shadows and hides them like its own things. A part stops being drawn over RE4's picture only once
  * RE4 says it has that part's object (minecraft_native_status.json), so nothing vanishes from both.
+ * <p>
+ * The blocks you built go the same way: each kind of block (its model and its own few textures) is written once,
+ * and every block RE4 can show is a "part" at the block's corner, under a negative number of its own.
  */
 public final class Re4Native {
     private static final String FOLDER = "minecraft";           // under natives/STM, and in RE4 resource paths
     private static final String MATERIAL_NAME = "mc";           // the one material in every part model
     private static final int MAX_TEXTURE_SIZE = 1024;           // pixel-art textures are scaled up to about this
     private static final Pattern TEXTURE = Pattern.compile("texture\\[Optional\\[([a-z0-9_.\\-]+:[a-z0-9_./\\-]+)\\]");
+    private static final int MAX_NATIVE_BLOCKS = 400;           // the nearest blocks RE4 shows; farther ones stay Minecraft's
+    private static final int MAX_BLOCK_QUADS = 512;
+    private static final int MAX_BLOCK_SPRITES = 16;
 
     /** One part model + material written for RE4. */
     public record Export(int id, String mesh, String material) {
@@ -89,6 +117,15 @@ public final class Re4Native {
     private static final Set<Integer> minecraftDrawn = new HashSet<>();   // some part drawn by Minecraft this frame
     private static MultiBufferSource.BufferSource depthSource = null;
     private static final Map<String, RenderType> depthTypes = new HashMap<>();
+    private static RenderType blockDepthType = null;
+    // Blocks, render thread. Block models are weak keys like model parts (a resource reload makes new ones)
+    private static final Map<BakedModel, Map<BlockState, Export>> blockExports = new WeakHashMap<>();
+    private static final Map<Long, BlockPose> blockPoses = new HashMap<>();   // block position -> its pose text
+    private static List<BlockPos> sortedFrom = null;   // the block list (and camera block) the nearest-first order is for
+    private static BlockPos sortedAt = null;
+    private static List<BlockPos> sorted = List.of();
+    private static int[] atlasPixels = null;           // the block atlas read back once (width, height, RGBA)
+    private static WeakReference<TextureAtlasSprite> atlasEra = new WeakReference<>(null);
     private static volatile boolean assetsDirty = false;   // the assets file couldn't be written (RE4 was reading it)
     private static int assetsRetry = 0;
     private static long seq = 0;
@@ -350,6 +387,266 @@ public final class Re4Native {
         }
     };
 
+    // ---- the blocks you built ----
+
+    /** A block's pose text, kept while the block, its model and its RE4 position stay the same. */
+    private record BlockPose(int export, double x, double y, double z, String text) {
+    }
+
+    /**
+     * Before the mobs are drawn (render thread): the built blocks RE4 can show itself go into this frame's poses,
+     * and the ones RE4 shows are drawn into Minecraft's depth only right away, so a mob behind such a wall is
+     * hidden like behind RE4's own. Returns those blocks; Minecraft draws all the others after the mobs, as before.
+     */
+    public static Set<BlockPos> blocks(BlockGetter level, List<BlockPos> nearby, Vec3 cam, PoseStack poseStack) {
+        if (frameOffset == null || nearby.isEmpty()) {
+            return Set.of();
+        }
+        BlockRenderDispatcher blockRenderer = Minecraft.getInstance().getBlockRenderer();
+        Set<BlockPos> shown = new HashSet<>();
+        int sent = 0;
+        for (BlockPos pos : nearestFirst(nearby, cam)) {
+            if (sent >= MAX_NATIVE_BLOCKS) {
+                break;
+            }
+            BlockState state = level.getBlockState(pos);
+            if (state.isAir()) {
+                continue;
+            }
+            Export export = exportFor(blockRenderer, state);
+            Vec3 corner = export == null ? null : Re4Terrain.toRe4(pos.getX(), pos.getY(), pos.getZ());
+            if (corner == null) {
+                continue;
+            }
+            frameParts.append(blockPose(pos, export, corner));
+            framePartCount++;
+            sent++;
+            if (acked.contains(export.id())) {
+                shown.add(pos);
+                poseStack.pushPose();
+                poseStack.translate(pos.getX() - cam.x, pos.getY() - cam.y, pos.getZ() - cam.z);
+                try {
+                    blockRenderer.renderSingleBlock(state, poseStack, BLOCK_DEPTH, LightTexture.FULL_BRIGHT, OverlayTexture.NO_OVERLAY);
+                } catch (RuntimeException e) {
+                    // RE4 still shows it; only Minecraft's hiding behind it is missing
+                }
+                poseStack.popPose();
+            }
+        }
+        if (!shown.isEmpty()) {
+            flushDepth();
+        }
+        return shown;
+    }
+
+    // The scanned blocks nearest the camera first (only needed past the cap; sorted again when the scan or the
+    // camera's block changes, not every frame)
+    private static List<BlockPos> nearestFirst(List<BlockPos> blocks, Vec3 cam) {
+        if (blocks.size() <= MAX_NATIVE_BLOCKS) {
+            return blocks;
+        }
+        BlockPos at = BlockPos.containing(cam);
+        if (blocks != sortedFrom || !at.equals(sortedAt)) {
+            List<BlockPos> copy = new ArrayList<>(blocks);
+            copy.sort(Comparator.comparingDouble(p -> p.distToCenterSqr(cam)));
+            sorted = copy;
+            sortedFrom = blocks;
+            sortedAt = at;
+        }
+        return sorted;
+    }
+
+    // A built block in the poses: no rotation, full size, at its corner. Its number is negative (entity ids never
+    // are) and the same every frame, so RE4 keeps one object on it; the text is kept, so RE4 sees it unchanged
+    private static String blockPose(BlockPos pos, Export export, Vec3 corner) {
+        long key = pos.asLong();
+        BlockPose cached = blockPoses.get(key);
+        if (cached != null && cached.export() == export.id() && cached.x() == corner.x && cached.y() == corner.y && cached.z() == corner.z) {
+            return cached.text();
+        }
+        if (blockPoses.size() > 8192) {
+            blockPoses.clear();   // blocks long gone
+        }
+        String text = String.format(Locale.ROOT, "%d,%d,%.4f,%.4f,%.4f,0,0,0,1,1,1,1;", blockId(pos), export.id(), corner.x, corner.y, corner.z);
+        blockPoses.put(key, new BlockPose(export.id(), corner.x, corner.y, corner.z, text));
+        return text;
+    }
+
+    /** The number a built block goes by in the poses: below zero, so never an entity's, and fixed per position. */
+    public static long blockId(BlockPos pos) {
+        return -1L - (pos.asLong() & Long.MAX_VALUE);
+    }
+
+    // Buffers for the blocks RE4 shows: whatever Minecraft asks for, the block textures into depth only (cut out,
+    // so the holes in a block's texture stay holes)
+    private static final MultiBufferSource BLOCK_DEPTH = renderType -> {
+        if (depthSource == null) {
+            depthSource = MultiBufferSource.immediate(new ByteBufferBuilder(1 << 16));
+        }
+        if (blockDepthType == null) {
+            blockDepthType = new DepthOnlyType(Sheets.cutoutBlockSheet());
+        }
+        return depthSource.getBuffer(blockDepthType);
+    };
+
+    // A kind of block (one block state) as an RE4 model, made once; null until its files are written, and always
+    // for blocks that stay Minecraft's
+    private static Export exportFor(BlockRenderDispatcher blockRenderer, BlockState state) {
+        BakedModel model = blockRenderer.getBlockModel(state);
+        Map<BlockState, Export> forModel = blockExports.computeIfAbsent(model, m -> new HashMap<>());
+        if (forModel.containsKey(state)) {
+            Export e = forModel.get(state);
+            return e != null && ready.containsKey(e.id()) ? e : null;
+        }
+        forModel.put(state, null);   // being made (or stays Minecraft's)
+        if (nativesFolder == null) {
+            return null;
+        }
+        BlockFiles files = blockFiles(state, model);
+        if (files == null) {
+            return null;
+        }
+        String key = files.meshName() + "|" + files.texName();
+        Export existing = byFiles.get(key);
+        if (existing != null) {
+            forModel.put(state, existing);
+            return ready.containsKey(existing.id()) ? existing : null;
+        }
+        Export export = new Export(nextId++, FOLDER + "/" + files.meshName() + ".mesh", FOLDER + "/" + files.texName() + ".mdf2");
+        byFiles.put(key, export);
+        forModel.put(state, export);
+        worker.execute(() -> writeExport(export, files.meshName(), files.texName(), null, "block:" + files.texName(),
+                files.positions(), files.normals(), files.uvs(), files.image()));
+        return null;
+    }
+
+    /** A block's model (in its own 0..1 space) and texture image, ready for writeExport. */
+    private record BlockFiles(String meshName, String texName, float[] positions, float[] normals, float[] uvs, int[] image) {
+    }
+
+    // Render thread: the block's faces as renderSingleBlock draws them, with its own textures cut out of the block
+    // atlas. Null when the block stays Minecraft's
+    private static BlockFiles blockFiles(BlockState state, BakedModel model) {
+        // Plain solid and cut-out blocks only: see-through ones (stained glass, ice, water) and blocks drawn by
+        // their own code (chests, banners) stay Minecraft's
+        if (state.getRenderShape() != RenderShape.MODEL) {
+            return null;
+        }
+        RenderType layer = ItemBlockRenderTypes.getChunkRenderType(state);
+        if (layer != RenderType.solid() && layer != RenderType.cutout() && layer != RenderType.cutoutMipped()) {
+            return null;
+        }
+        // The same random seed as renderSingleBlock, so the same variant of the model
+        List<BakedQuad> quads = new ArrayList<>();
+        RandomSource random = RandomSource.create();
+        for (Direction direction : Direction.values()) {
+            random.setSeed(42L);
+            quads.addAll(model.getQuads(state, direction, random));
+        }
+        random.setSeed(42L);
+        quads.addAll(model.getQuads(state, null, random));
+        if (quads.isEmpty() || quads.size() > MAX_BLOCK_QUADS) {
+            return null;
+        }
+        // Biome-coloured faces (grass, leaves, vines) stay Minecraft's: the RE4 copy can't take the colour
+        List<TextureAtlasSprite> sprites = new ArrayList<>();
+        for (BakedQuad quad : quads) {
+            if (quad.isTinted() || quad.getVertices().length != 32 || !InventoryMenu.BLOCK_ATLAS.equals(quad.getSprite().atlasLocation())) {
+                return null;
+            }
+            if (!sprites.contains(quad.getSprite())) {
+                sprites.add(quad.getSprite());
+            }
+        }
+        int[] atlas = blockAtlas();
+        if (atlas == null || sprites.size() > MAX_BLOCK_SPRITES) {
+            return null;
+        }
+        int aw = atlas[0], ah = atlas[1];
+        // Not the whole atlas (its 16-pixel tiles would blur into each other in RE4): the block's own textures in
+        // a row of power-of-two cells
+        int cw = 1, ch = 1;
+        for (TextureAtlasSprite s : sprites) {
+            if (s.getX() + s.contents().width() > aw || s.getY() + s.contents().height() > ah) {
+                return null;
+            }
+            cw = Math.max(cw, s.contents().width());
+            ch = Math.max(ch, s.contents().height());
+        }
+        cw = Mth.smallestEncompassingPowerOfTwo(cw);
+        ch = Mth.smallestEncompassingPowerOfTwo(ch);
+        int cols = Mth.smallestEncompassingPowerOfTwo(sprites.size());
+        int w = cols * cw, h = ch;
+        if (w > 4096 || h > 4096) {
+            return null;
+        }
+        int[] image = new int[2 + w * h];
+        image[0] = w;
+        image[1] = h;
+        for (int c = 0; c < cols; c++) {
+            // Spare cells repeat the last texture and a smaller texture repeats its edge, so a solid block gets no
+            // see-through pixels (and no cut-out material)
+            TextureAtlasSprite s = sprites.get(Math.min(c, sprites.size() - 1));
+            int sw = s.contents().width(), sh = s.contents().height();
+            for (int y = 0; y < ch; y++) {
+                for (int x = 0; x < cw; x++) {
+                    int ax = s.getX() + Math.min(x, sw - 1), ay = s.getY() + Math.min(y, sh - 1);
+                    image[2 + y * w + c * cw + x] = atlas[2 + ay * aw + ax];
+                }
+            }
+        }
+        // Each face's atlas coordinates moved into its cell of the small image. A quad's vertices are
+        // DefaultVertexFormat.BLOCK, 8 ints each: x y z, colour, u v, light, normal
+        GeometryCapture geometry = new GeometryCapture();
+        for (BakedQuad quad : quads) {
+            int[] v = quad.getVertices();
+            TextureAtlasSprite s = quad.getSprite();
+            int cell = sprites.indexOf(s);
+            Vec3i normal = quad.getDirection().getNormal();
+            for (int i = 0; i < 4; i++) {
+                int o = i * 8;
+                float u = Float.intBitsToFloat(v[o + 4]) * aw - s.getX();
+                float vv = Float.intBitsToFloat(v[o + 5]) * ah - s.getY();
+                geometry.addVertex(Float.intBitsToFloat(v[o]), Float.intBitsToFloat(v[o + 1]), Float.intBitsToFloat(v[o + 2]))
+                        .setUv((cell * cw + u) / w, vv / h)
+                        .setNormal(normal.getX(), normal.getY(), normal.getZ());
+            }
+        }
+        float[] positions = geometry.positions();
+        float[] uvs = geometry.uvs();
+        if (!finite(positions) || !finite(uvs)) {
+            return null;
+        }
+        // Named by content: the same block from another resource pack (or animation frame) gets its own files
+        String meshName = "m_" + hash(positions, uvs) + "_r" + Re4NativeFiles.FORMAT_REV;
+        String texName = "b_" + hashImage(sprites, image) + "_r" + Re4NativeFiles.FORMAT_REV;
+        return new BlockFiles(meshName, texName, positions, geometry.normals(), uvs, image);
+    }
+
+    private static boolean finite(float[] values) {
+        for (float f : values) {
+            if (!Float.isFinite(f)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Render thread: the block atlas's pixels, read from the graphics card once (again after a resource reload,
+    // which makes a new atlas: its missing-texture sprite is then a new object)
+    private static int[] blockAtlas() {
+        TextureAtlasSprite missing = Minecraft.getInstance().getModelManager().getAtlas(InventoryMenu.BLOCK_ATLAS)
+                .getSprite(MissingTextureAtlasSprite.getLocation());
+        if (atlasEra.get() != missing) {
+            atlasEra = new WeakReference<>(missing);
+            atlasPixels = readGpuTexture(InventoryMenu.BLOCK_ATLAS);
+            if (atlasPixels == null) {
+                Re4Bridge.LOGGER.info("RE4 Bridge: the block atlas can't be read; built blocks stay drawn by Minecraft");
+            }
+        }
+        return atlasPixels;
+    }
+
     // ---- exports ----
 
     private static Export exportFor(ModelPart part, String texture, List<ModelPart.Cube> cubes) {
@@ -557,6 +854,23 @@ public final class Re4Native {
         }
     }
 
+    // A block texture's name: its sprites' names and the pixels themselves
+    private static String hashImage(List<TextureAtlasSprite> sprites, int[] image) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-1");
+            for (TextureAtlasSprite s : sprites) {
+                md.update(s.contents().name().toString().getBytes(StandardCharsets.UTF_8));
+                md.update((byte) '|');
+            }
+            ByteBuffer pixels = ByteBuffer.allocate(image.length * 4);
+            pixels.asIntBuffer().put(image);
+            md.update(pixels.array());
+            return hex(md.digest()).substring(0, 16);
+        } catch (Exception e) {
+            return Integer.toHexString(java.util.Arrays.hashCode(image));
+        }
+    }
+
     private static String hex(byte[] bytes) {
         StringBuilder sb = new StringBuilder();
         for (byte b : bytes) {
@@ -701,34 +1015,38 @@ public final class Re4Native {
 
         @Override
         public VertexConsumer getBuffer(RenderType renderType) {
-            TaggedConsumer w = wrappers.computeIfAbsent(renderType, rt -> new TaggedConsumer(textureOf(rt)));
+            TaggedConsumer w = wrappers.computeIfAbsent(renderType, TaggingSource::wrapperFor);
             w.delegate = delegate.getBuffer(renderType);
             return w;
         }
 
-        private static String textureOf(RenderType renderType) {
+        private static TaggedConsumer wrapperFor(RenderType renderType) {
             String s = renderType.toString();
             // Only the plain opaque entity render types (solid, cutout): see-through layers (slime jelly), glints,
-            // outlines, glowing eyes and energy swirls keep Minecraft's drawing
-            if (!s.startsWith("RenderType[entity_solid") && !s.startsWith("RenderType[entity_cutout")) {
-                return null;
+            // outlines, glowing eyes and energy swirls keep Minecraft's drawing. Players are drawn see-through
+            // (for their skin's outer layer): for them that one is taken too, cut out like the others
+            boolean playersOnly = s.startsWith("RenderType[entity_translucent:");
+            if (!playersOnly && !s.startsWith("RenderType[entity_solid") && !s.startsWith("RenderType[entity_cutout")) {
+                return new TaggedConsumer(null, false);
             }
             Matcher m = TEXTURE.matcher(s);
-            return m.find() ? m.group(1) : null;
+            return new TaggedConsumer(m.find() ? m.group(1) : null, playersOnly);
         }
     }
 
     private static final class TaggedConsumer implements VertexConsumer, Tagged {
         private final String texture;
+        private final boolean playersOnly;
         VertexConsumer delegate;
 
-        TaggedConsumer(String texture) {
+        TaggedConsumer(String texture, boolean playersOnly) {
             this.texture = texture;
+            this.playersOnly = playersOnly;
         }
 
         @Override
         public String texture() {
-            return texture;
+            return playersOnly && !(currentEntity instanceof Player) ? null : texture;
         }
 
         @Override
