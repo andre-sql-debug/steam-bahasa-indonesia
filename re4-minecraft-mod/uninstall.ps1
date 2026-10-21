@@ -60,7 +60,8 @@ if ($re4) {
     Remove (Join-Path $re4 'reframework\plugins\re4_minecraft_overlay.dll')
     $data = Join-Path $re4 'reframework\data'
     if (Test-Path $data) {
-        Get-ChildItem $data -Filter 'minecraft_*.json' | ForEach-Object { Remove $_.FullName }
+        # (also the overlay picture file and half-written .tmp files)
+        Get-ChildItem $data -Filter 'minecraft_*' -File | ForEach-Object { Remove $_.FullName }
     }
     Remove (Join-Path $re4 'natives\STM\minecraft')
     Write-Host '   REFramework''s Loose File Loader was left on (other mods may use it); turn it off in RE4: Insert > Loose File Loader.'

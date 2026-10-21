@@ -117,7 +117,9 @@ def native_handoff(re4, mc):
     """Real RE4 mobs: Minecraft exports the golem's parts, sends their poses, and stops drawing what RE4 shows."""
     ensure_alive(re4)
     mc.mark()
-    run_commands(re4, ["/kill @e[type=iron_golem]", "/summon iron_golem ~0.5 ~ ~3 {NoAI:1b}"])
+    # (the test world is Peaceful: a passive mob with scaled parts, a baby pig, stands in for the scaled ones)
+    run_commands(re4, ["/kill @e[type=iron_golem]", "/kill @e[type=pig]", "/summon iron_golem ~0.5 ~ ~3 {NoAI:1b}",
+                       "/summon pig ~2.5 ~ ~3 {NoAI:1b,Age:-24000,Rotation:[70f,0f]}"])
     re4.native_status = {"enabled": True, "acked": [], "session": None}
     re4.run_for(8.0)
     assets = re4.read_json("minecraft_native_assets.json")
@@ -132,6 +134,14 @@ def native_handoff(re4, mc):
     pic_before = re4.overlay_picture()
     poses = re4.read_json("minecraft_native_poses.json") or {}
     parts = [p for p in (poses.get("parts") or "").split(";") if p]
+    # every rotation sent is a unit quaternion, also for the baby pig's scaled parts
+    norms = []
+    for p in parts:
+        v = p.split(",")
+        if len(v) == 12:
+            norms.append(math.sqrt(sum(float(x) ** 2 for x in v[5:9])))
+    worst_norm_error = max((abs(n - 1.0) for n in norms), default=1.0)
+    entities = len({p.split(",")[0] for p in parts})
     re4.native_status = {"enabled": True, "acked": [int(k) for k in assets["exports"]], "session": assets.get("session")}
     re4.run_for(3.0)
     pic_after = re4.overlay_picture()
@@ -140,9 +150,11 @@ def native_handoff(re4, mc):
     before_px, after_px = opaque_pixels(pic_before, box), opaque_pixels(pic_after, box)
     re4.native_status = {"enabled": False, "acked": [], "session": None}
     re4.run_for(1.0)
-    run_commands(re4, ["/kill @e[type=iron_golem]"])
-    ok = len(assets["exports"]) >= 6 and len(parts) >= 6 and after_px < 0.25 * max(1, before_px)
-    return result("native_handoff", ok, exports=len(assets["exports"]), parts_in_poses=len(parts),
+    run_commands(re4, ["/kill @e[type=iron_golem]", "/kill @e[type=pig]"])
+    ok = (len(assets["exports"]) >= 6 and len(parts) >= 6 and after_px < 0.25 * max(1, before_px)
+          and entities >= 2 and worst_norm_error < 1e-3)
+    return result("native_handoff", ok, exports=len(assets["exports"]), parts_in_poses=len(parts), entities=entities,
+                  worst_quaternion_norm_error=round(worst_norm_error, 6),
                   overlay_pixels_before=before_px, overlay_pixels_after=after_px)
 
 

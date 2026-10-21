@@ -4,8 +4,12 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mojang.blaze3d.platform.NativeImage;
+import com.mojang.blaze3d.systems.RenderSystem;
+import com.mojang.blaze3d.vertex.ByteBufferBuilder;
+import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
+import com.mojang.blaze3d.vertex.VertexFormat;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.model.geom.ModelPart;
 import net.minecraft.client.renderer.MultiBufferSource;
@@ -14,6 +18,7 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.packs.resources.Resource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.phys.Vec3;
+import org.joml.Matrix3f;
 import org.joml.Matrix4f;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
@@ -26,6 +31,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
@@ -33,6 +39,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -69,15 +76,21 @@ public final class Re4Native {
     private static boolean broken = false;
     private static String problem = "";
 
-    // Render thread
-    private static final Map<ModelPart, Map<String, Export>> exports = new IdentityHashMap<>();
+    // Render thread. Model parts are weak keys: reloaded models (F3+T, resource packs) drop their old parts
+    private static final Map<ModelPart, Map<String, Export>> exports = new WeakHashMap<>();
     private static final Map<String, Export> byFiles = new HashMap<>();   // mesh+material -> export (same content)
     private static int nextId = 1;
     private static Entity currentEntity = null;
+    private static final Set<ModelPart> entityParts = Collections.newSetFromMap(new IdentityHashMap<>());   // this entity's, sent
     private static Vec3 frameOffset = null;          // camera-relative -> RE4 world
     private static final StringBuilder frameParts = new StringBuilder();
     private static int framePartCount = 0;
-    private static final Set<Integer> nativeEntities = new HashSet<>();
+    private static final Set<Integer> nativeEntities = new HashSet<>();   // some part shown by RE4 this frame
+    private static final Set<Integer> minecraftDrawn = new HashSet<>();   // some part drawn by Minecraft this frame
+    private static MultiBufferSource.BufferSource depthSource = null;
+    private static final Map<String, RenderType> depthTypes = new HashMap<>();
+    private static volatile boolean assetsDirty = false;   // the assets file couldn't be written (RE4 was reading it)
+    private static int assetsRetry = 0;
     private static long seq = 0;
     private static boolean sentEmpty = true;
     // Part numbers start at 1 in every Minecraft session: RE4 only uses numbers of the session it loaded
@@ -164,24 +177,34 @@ public final class Re4Native {
         frameParts.setLength(0);
         framePartCount = 0;
         nativeEntities.clear();
+        minecraftDrawn.clear();
         frameOffset = enabled() ? Re4Terrain.toRe4(cam.x, cam.y, cam.z) : null;
     }
 
     public static void beginEntity(Entity entity) {
         currentEntity = entity;
+        entityParts.clear();
     }
 
     public static void endEntity() {
         currentEntity = null;
     }
 
-    /** True when some part of this entity was shown by RE4 this frame (no Minecraft shadow needed). */
+    /**
+     * True when RE4 showed this entity this frame and Minecraft drew none of its parts (RE4 casts its shadow; a
+     * player whose cape alone is RE4's still gets Minecraft's shadow).
+     */
     public static boolean shownByRe4(Entity entity) {
-        return nativeEntities.contains(entity.getId());
+        return nativeEntities.contains(entity.getId()) && !minecraftDrawn.contains(entity.getId());
     }
 
     /** End of the entity drawing: send the parts' poses to RE4. */
     public static void endFrame() {
+        // The part list couldn't be written earlier (RE4 was reading it): try again now and then
+        if (assetsDirty && ++assetsRetry % 20 == 0) {
+            assetsDirty = false;
+            worker.execute(Re4Native::retryAssets);
+        }
         if (!enabled()) {
             if (!sentEmpty) {
                 writePoses("");   // tell RE4 to hide everything
@@ -205,49 +228,127 @@ public final class Re4Native {
     }
 
     /**
-     * Called by ModelPartMixin instead of drawing a part's cuboids. Returns true when RE4 shows this part itself
-     * (then Minecraft doesn't draw it).
+     * Called by ModelPartMixin before drawing a part's cuboids. Returns null when Minecraft draws the part as usual,
+     * or, when RE4 shows the part itself, a consumer that draws it into Minecraft's depth only: then whatever
+     * Minecraft still draws (armour, held items, layers) is hidden behind RE4's part like it would be behind its own.
+     * Call {@link #flushDepth()} after drawing into it.
      */
-    public static boolean onPartCompile(ModelPart part, PoseStack.Pose pose, VertexConsumer consumer, List<ModelPart.Cube> cubes, int color) {
-        // Tinted parts (dyed wool, leather armor) keep Minecraft's drawing: the RE4 copy has no tint
-        if (currentEntity == null || frameOffset == null || cubes.isEmpty() || color != -1 || !(consumer instanceof Tagged tagged)) {
-            return false;
+    public static VertexConsumer onPartCompile(ModelPart part, PoseStack.Pose pose, VertexConsumer consumer, List<ModelPart.Cube> cubes, int color) {
+        if (currentEntity == null || frameOffset == null || cubes.isEmpty()) {
+            return null;
         }
-        String texture = tagged.texture();
-        if (texture == null || failedTextures.contains(texture)) {
-            return false;
+        int entityId = currentEntity.getId();
+        // Tinted parts (dyed wool, leather armor) keep Minecraft's drawing: the RE4 copy has no tint
+        String texture = color == -1 && consumer instanceof Tagged tagged ? tagged.texture() : null;
+        // Texture layers drawn over the same part (villager clothes and badges, golem cracks) stay Minecraft's:
+        // only the first texture of each part goes to RE4, the layers are drawn over it at the same depth
+        if (texture == null || failedTextures.contains(texture) || !entityParts.add(part)) {
+            minecraftDrawn.add(entityId);
+            return null;
         }
         Export export = exportFor(part, texture, cubes);
-        if (export == null) {
-            return false;
-        }
-        // RE4 world transform of the part: camera-relative pose moved into RE4's coordinates
+        // RE4 world transform of the part: camera-relative pose moved into RE4's coordinates. The rotation comes from
+        // the matrix with its scale divided out (babies, cave spiders and ghasts are scaled), and a mirrored part
+        // keeps its mirror in the scale
         Matrix4f m = pose.pose();
         Vector3f t = m.getTranslation(new Vector3f());
         Vector3f s = m.getScale(new Vector3f());
-        if (m.determinant() < 0) {
+        Matrix3f r = m.get3x3(new Matrix3f());
+        if (r.determinant() < 0) {
             s.x = -s.x;
+            r.m00 = -r.m00;
+            r.m01 = -r.m01;
+            r.m02 = -r.m02;
         }
-        Quaternionf q = m.getNormalizedRotation(new Quaternionf());
-        if (!Float.isFinite(q.x) || !Float.isFinite(t.x) || s.x == 0.0F) {
-            return false;
+        Quaternionf q = r.getUnnormalizedRotation(new Quaternionf());
+        if (export == null || !Float.isFinite(q.x) || !Float.isFinite(t.x) || s.x == 0.0F) {
+            minecraftDrawn.add(entityId);
+            return null;
         }
         frameParts.append(String.format(Locale.ROOT, "%d,%d,%.4f,%.4f,%.4f,%.5f,%.5f,%.5f,%.5f,%.4f,%.4f,%.4f;",
-                currentEntity.getId(), export.id(),
+                entityId, export.id(),
                 frameOffset.x + t.x, frameOffset.y + t.y, frameOffset.z + t.z,
                 q.x, q.y, q.z, q.w, s.x, s.y, s.z));
         framePartCount++;
-        boolean shown = acked.contains(export.id());
-        if (shown) {
-            nativeEntities.add(currentEntity.getId());
+        if (!acked.contains(export.id())) {
+            minecraftDrawn.add(entityId);
+            return null;
         }
+        nativeEntities.add(entityId);
         // Hit: Minecraft also draws its red-flashing copy over RE4's for that moment
-        if (shown && currentEntity instanceof net.minecraft.world.entity.LivingEntity living
-                && (living.hurtTime > 0 || living.deathTime > 0)) {
-            return false;
+        if (currentEntity instanceof net.minecraft.world.entity.LivingEntity living && (living.hurtTime > 0 || living.deathTime > 0)) {
+            return null;
         }
-        return shown;
+        return depthOnly(texture);
     }
+
+    // Depth-only copies of the parts RE4 shows, drawn at once (before Minecraft draws what may be behind them)
+    private static VertexConsumer depthOnly(String texture) {
+        ResourceLocation location = ResourceLocation.tryParse(texture);
+        if (location == null) {
+            return NO_DRAW;
+        }
+        if (depthSource == null) {
+            depthSource = MultiBufferSource.immediate(new ByteBufferBuilder(1 << 16));
+        }
+        RenderType type = depthTypes.computeIfAbsent(texture, t -> new DepthOnlyType(RenderType.entityCutoutNoCull(location)));
+        return depthSource.getBuffer(type);
+    }
+
+    /** After a part was drawn into {@link #onPartCompile}'s depth-only consumer. */
+    public static void flushDepth() {
+        if (depthSource != null) {
+            depthSource.endBatch();
+        }
+    }
+
+    /** A cut-out entity render type that writes depth but no colour. */
+    private static final class DepthOnlyType extends RenderType {
+        DepthOnlyType(RenderType base) {
+            super("re4bridge_depth_only", DefaultVertexFormat.NEW_ENTITY, VertexFormat.Mode.QUADS, 1536, false, false,
+                    () -> {
+                        base.setupRenderState();
+                        RenderSystem.colorMask(false, false, false, false);
+                    },
+                    () -> {
+                        RenderSystem.colorMask(true, true, true, true);
+                        base.clearRenderState();
+                    });
+        }
+    }
+
+    // Draws nothing (a part RE4 shows whose texture name can't be used for the depth copy)
+    private static final VertexConsumer NO_DRAW = new VertexConsumer() {
+        @Override
+        public VertexConsumer addVertex(float x, float y, float z) {
+            return this;
+        }
+
+        @Override
+        public VertexConsumer setColor(int r, int g, int b, int a) {
+            return this;
+        }
+
+        @Override
+        public VertexConsumer setUv(float u, float v) {
+            return this;
+        }
+
+        @Override
+        public VertexConsumer setUv1(int u, int v) {
+            return this;
+        }
+
+        @Override
+        public VertexConsumer setUv2(int u, int v) {
+            return this;
+        }
+
+        @Override
+        public VertexConsumer setNormal(float x, float y, float z) {
+            return this;
+        }
+    };
 
     // ---- exports ----
 
@@ -319,12 +420,22 @@ public final class Re4Native {
                 writeAtomically(mdf, Re4NativeFiles.material(MATERIAL_NAME, FOLDER + "/" + texName + ".tex",
                         textures.cutout() != null ? FOLDER + "/" + cutoutName + ".tex" : null));
             }
-            ready.put(export.id(), export);
-            writeAssets();
         } catch (Exception e) {
             failedTextures.add(texture);
             problem = "could not write " + meshName + ": " + e;
             Re4Bridge.LOGGER.warn("RE4 Bridge: could not write the RE4 model for {}", texture, e);
+            return;
+        }
+        // The files are complete: tell RE4 (a failure here is only RE4 reading the list right now: retried)
+        ready.put(export.id(), export);
+        retryAssets();
+    }
+
+    private static void retryAssets() {
+        try {
+            writeAssets();
+        } catch (IOException e) {
+            assetsDirty = true;
         }
     }
 

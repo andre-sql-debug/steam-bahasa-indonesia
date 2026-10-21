@@ -102,9 +102,15 @@ local create_method = nil
 pcall(function() create_method = sdk.find_type_definition("via.GameObject"):get_method("create(System.String)") end)
 local mesh_type = sdk.typeof("via.render.Mesh")
 
+-- Every object gets its own name, remembered: objects RE4 kept through a loading screen are found again by name
+local made_names, name_counter = {}, 0
+
 local function new_object(id, asset)
     if create_method == nil or mesh_type == nil then return nil, "via.GameObject.create or via.render.Mesh missing" end
-    local okc, go = pcall(function() return create_method:call(nil, "MinecraftPart_" .. id) end)
+    name_counter = name_counter + 1
+    local name = string.format("MinecraftPart_%s_%d", tostring(id), name_counter)
+    made_names[#made_names + 1] = name
+    local okc, go = pcall(function() return create_method:call(nil, name) end)
     if not okc or go == nil then return nil, "create failed: " .. tostring(go) end
     pcall(function() go = go:add_ref() end)
     pcall(function() go:call(".ctor") end)
@@ -164,6 +170,26 @@ destroy_all = function(touch)
         state.pool[id] = nil
     end
     debug.pooled = 0
+    if touch then made_names = {} end
+end
+
+-- After a loading screen: objects of ours that RE4 kept (forgotten while it loaded) are looked up by name in the
+-- current scene and removed, so no frozen copy of a mob stays behind
+local function remove_survivors()
+    if #made_names == 0 then return end
+    local names = made_names
+    made_names = {}
+    local ok, scene = pcall(function()
+        return sdk.call_native_func(sdk.get_native_singleton("via.SceneManager"), sdk.find_type_definition("via.SceneManager"),
+            "get_CurrentScene()")
+    end)
+    if not ok or scene == nil then return end
+    local removed = 0
+    for _, name in ipairs(names) do
+        local okf, go = pcall(function() return scene:call("findGameObject(System.String)", name) end)
+        if okf and go ~= nil and pcall(function() go:call("destroy(via.GameObject)", go) end) then removed = removed + 1 end
+    end
+    if removed > 0 then note_error(string.format("removed %d parts left from before the loading screen", removed)) end
 end
 
 ------------------------------------------------------------------------------
@@ -246,6 +272,8 @@ local function hide_all()
 end
 
 local function read_poses()
+    -- (no part list from Minecraft yet: there is no poses file either, and reading a missing file logs an error)
+    if state.session == nil then return end
     local ok, data = pcall(json.load_file, POSES_FILE)
     if not ok or type(data) ~= "table" or data.seq == nil or data.seq == state.poses_seq
             or data.session ~= state.session then
@@ -282,6 +310,7 @@ re.on_application_entry("LateUpdateBehavior", function()
         debug.status = "waiting for Leon"
         return
     end
+    if not was_present then pcall(remove_survivors) end
     was_present = true
     if settings.enabled then
         if state.frame % ASSETS_EVERY_FRAMES == 0 then pcall(load_assets) end

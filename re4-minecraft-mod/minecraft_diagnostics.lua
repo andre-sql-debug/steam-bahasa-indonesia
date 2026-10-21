@@ -841,6 +841,9 @@ local function start_live(kind)
         while #live.nodes > 3 do table.remove(live.nodes) end
         r.candidates = live.nodes
         live.per = {}
+        -- the enemy is also turned to face a point beside it (where a mob would be): does it keep facing it?
+        live.target = side_point(epos, me, 2.5, 0.0)
+        live.tr = body and try_call(body, "get_Transform")
         if live.fsm == nil then
             r.result = "the enemy has no MotionFsm2"
         elseif live.info == nil then
@@ -1067,22 +1070,41 @@ local function step_live()
             local started = {}
             for _, p in ipairs(t.per) do if p.started then started[#started + 1] = p.node end end
             t.result.per_state = t.per
-            t.result.result = #started > 0
-                and ("the enemy started the asked-for attack (" .. started[1] .. "): enemies can be made to swing at mobs")
-                or "the enemy did not start the asked-for attacks"
+            if #started > 0 then
+                t.result.result = "the enemy started the asked-for attack (" .. started[1] .. "): enemies now swing at the mobs they fight"
+                local when = os.date and os.date("%Y-%m-%d %H:%M") or "?"
+                pcall(json.dump_file, "minecraft_attack.json", { works = true, nodes = started, time = when })
+                if type(MinecraftRE4Attack) == "table" then MinecraftRE4Attack.load() end
+            else
+                t.result.result = "the enemy did not start the asked-for attacks"
+            end
             finish_live()
             return
         end
         local cur = t.per[idx]
         local now = try_call(t.fsm, "getCurrentNodeName", 0)
         if fi == 0 then
-            cur = { node = t.nodes[idx], before = now, changes = {} }
+            cur = { node = t.nodes[idx], before = now, changes = {}, facing = {} }
             t.per[idx] = cur
         elseif fi == ATTACK_ASK_FRAME then
+            -- turn to the point (yaw only; models look along +Z), then ask for the attack
+            if t.tr ~= nil and epos ~= nil then
+                local half = math.atan(t.target.x - epos.x, t.target.z - epos.z) * 0.5
+                local okq, rot = pcall(function() return Quaternion.new(math.cos(half), 0, math.sin(half), 0) end)
+                cur.turned = okq and rot ~= nil and pcall(function() t.tr:call("set_Rotation", rot) end) or false
+            end
             local ok, err = pcall(function()
                 t.fsm:call("setCurrentNode(System.String, System.UInt32, via.behaviortree.SetNodeInfo)", cur.node, 0, t.info)
             end)
             cur.call = ok and "called" or ("failed: " .. tostring(err))
+        end
+        -- where the enemy faces after being turned: toward the point (1.0) or back to Leon?
+        if t.tr ~= nil and epos ~= nil and (fi == ATTACK_ASK_FRAME + 1 or fi == ATTACK_ASK_FRAME + 10 or fi == ATTACK_ASK_FRAME + 30) then
+            local okf, fwd = pcall(function() return t.tr:call("get_Rotation") * Vector3f.new(0, 0, 1) end)
+            if okf and fwd ~= nil then
+                cur.facing[#cur.facing + 1] = string.format("[%d] to point %.2f, to Leon %.2f", fi,
+                    cos_to(fwd, epos, t.target), me and cos_to(fwd, epos, me) or 0)
+            end
         end
         if fi > 0 and now ~= cur.last then
             cur.changes[#cur.changes + 1] = string.format("[%d] %s", fi, tostring(now))

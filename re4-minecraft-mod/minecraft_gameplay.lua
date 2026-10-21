@@ -21,6 +21,7 @@ local settings = {
     movement = true,
     combat = true,
     enemies_look_at_mobs = true,
+    enemies_attack_mobs = true,   -- (once the Attack test found a way that works)
     flinch = true,          -- enemies react to Minecraft hits (once the Flinch test found a way that works)
     no_damage = true,       -- Leon keeps full health: RE4's hits go to your Minecraft hearts instead
     share_death = true,     -- Minecraft's player dying kills Leon, and RE4 killing Leon kills Minecraft's player
@@ -1253,6 +1254,101 @@ local function update_enemy_attention()
     debug.attention = string.format("%d enemies fighting Minecraft mobs, %d looking at them", count, looking)
 end
 
+------------------------------------------------------------------------------
+-- RE4 enemies swing at the Minecraft mobs fighting them: an enemy close enough to its mob is turned to face
+-- it and asked for one of its own attacks (the attack states the Attack test in minecraft_diagnostics.lua
+-- found to work, saved in reframework\data\minecraft_attack.json). Minecraft decides the damage to the mob.
+------------------------------------------------------------------------------
+local ATTACK_FILE = "minecraft_attack.json"
+local ATTACK_REACH = 2.2               -- meters (flat) between the enemy and the mob
+local ATTACK_COOLDOWN_FRAMES = 150     -- one swing per enemy at most every 2.5 s
+local ATTACK_FACE_FRAMES = 16          -- kept turned to the mob while the swing starts
+
+local ATTACK = { works = false, nodes = {}, last = {}, swings = 0, info = nil,
+    status = "not tested yet (Minecraft Diagnostics -> Attack test)" }
+MinecraftRE4Attack = ATTACK   -- (the Attack test reloads it after it found a way)
+
+function ATTACK.load()
+    local ok, saved = pcall(json.load_file, ATTACK_FILE)
+    if not ok or type(saved) ~= "table" or saved.works ~= true or type(saved.nodes) ~= "table" then return end
+    local nodes = {}
+    for _, n in ipairs(saved.nodes) do
+        if type(n) == "string" then nodes[#nodes + 1] = n end
+    end
+    ATTACK.nodes = nodes
+    ATTACK.works = #nodes > 0
+    if ATTACK.works then ATTACK.status = "on (tested " .. tostring(saved.time or "?") .. ")" end
+end
+ATTACK.load()
+
+local motion_fsm_type = sdk.typeof("via.motion.MotionFsm2")
+
+local function set_node_info()
+    if ATTACK.info == nil then
+        local td = sdk.find_type_definition("via.behaviortree.SetNodeInfo")
+        local okv, isvalue = pcall(function() return td:is_value_type() end)
+        if td ~= nil then
+            ATTACK.info = (okv and isvalue) and ValueType.new(td) or sdk.create_instance("via.behaviortree.SetNodeInfo")
+        end
+    end
+    return ATTACK.info
+end
+
+-- Turn the enemy to face along (dx, dz) (yaw only; RE4 models look along +Z)
+local function face(body, dx, dz)
+    local tr = try_call(body, "get_Transform")
+    if tr == nil or (dx == 0 and dz == 0) then return end
+    local half = math.atan(dx, dz) * 0.5
+    local ok, rot = pcall(function() return Quaternion.new(math.cos(half), 0, math.sin(half), 0) end)
+    if ok and rot ~= nil then try_call(tr, "set_Rotation", rot) end
+end
+
+local function busy_state(node)
+    local l = node:lower()
+    for _, word in ipairs({ "attack", "dam", "dmg", "wince", "stagger", "knock", "react", "stun", "dead", "die" }) do
+        if l:find(word, 1, true) then return true end
+    end
+    return false
+end
+
+local function update_enemy_attacks()
+    if not settings.enemies_attack_mobs or not ATTACK.works or type(bridge.engaged) ~= "string" then return end
+    if state.frame % 2 ~= 0 then return end
+    local living = nil
+    for key, x, _, z in bridge.engaged:gmatch("([^,;]+),([^,;]+),([^,;]+),([^,;]+);") do
+        local mx, mz = tonumber(x), tonumber(z)
+        living = living or living_enemies()
+        local enemy = living[key]
+        local epos = enemy and try_call(enemy, "get_Position")
+        local body = enemy and try_call(enemy, "get_BodyGameObject")
+        if mx ~= nil and mz ~= nil and epos ~= nil and body ~= nil then
+            local dx, dz = mx - epos.x, mz - epos.z
+            local since = state.frame - (ATTACK.last[key] or -100000)
+            if since <= ATTACK_FACE_FRAMES then
+                face(body, dx, dz)   -- the swing is starting: keep it aimed at the mob
+            elseif since >= ATTACK_COOLDOWN_FRAMES and dx * dx + dz * dz <= ATTACK_REACH * ATTACK_REACH then
+                local fsm = try_call(body, "getComponent(System.Type)", motion_fsm_type)
+                local now = fsm and try_call(fsm, "getCurrentNodeName", 0)
+                local info = set_node_info()
+                if type(now) == "string" and not busy_state(now) and info ~= nil then
+                    for _, node in ipairs(ATTACK.nodes) do
+                        if try_call(fsm, "hasNodeFullName(System.String)", node) == true then
+                            ATTACK.last[key] = state.frame
+                            face(body, dx, dz)
+                            if pcall(function()
+                                fsm:call("setCurrentNode(System.String, System.UInt32, via.behaviortree.SetNodeInfo)", node, 0, info)
+                            end) then
+                                ATTACK.swings = ATTACK.swings + 1
+                            end
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
 local function shoot_enemy(damage, note)
     local hp, count = find_ranged_target()
     if hp == nil then
@@ -1270,6 +1366,8 @@ local function update_minecraft_combat()
         release_attention()   -- cutscenes, grabs, menus: RE4's own scenes decide where enemies look
     else
         update_enemy_attention()
+        local ok, err = pcall(update_enemy_attacks)
+        if not ok then ATTACK.status = "error: " .. tostring(err) end
     end
 
     -- Melee: a new attack calculated by Minecraft (the first one seen is from before we started)
@@ -1511,6 +1609,8 @@ local function draw_ui()
         changed, settings.movement = imgui.checkbox("Minecraft movement", settings.movement)
         changed, settings.combat = imgui.checkbox("Melee combat (left-click)", settings.combat)
         changed, settings.enemies_look_at_mobs = imgui.checkbox("Enemies look at the Minecraft mobs fighting them", settings.enemies_look_at_mobs)
+        changed, settings.enemies_attack_mobs = imgui.checkbox("Enemies swing at the Minecraft mobs fighting them", settings.enemies_attack_mobs)
+        imgui.text(string.format("  Swings: %s, %d so far", ATTACK.status, ATTACK.swings))
         changed, settings.flinch = imgui.checkbox("Enemies flinch at Minecraft hits", settings.flinch)
         imgui.text("  Flinch: " .. HIT.status)
         changed, settings.no_damage = imgui.checkbox("RE4's hits cost Minecraft hearts (Leon keeps full health)", settings.no_damage)
