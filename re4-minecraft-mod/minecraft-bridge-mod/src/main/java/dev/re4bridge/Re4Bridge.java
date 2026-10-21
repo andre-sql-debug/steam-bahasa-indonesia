@@ -191,6 +191,7 @@ public class Re4Bridge implements ClientModInitializer {
         OverlayStreamer.open(outputFile.resolveSibling("minecraft_overlay.bin"));
         Re4Puppet.init(outputFile.resolveSibling("minecraft_puppet.json"));
         Re4Input.init(outputFile.resolveSibling("minecraft_mouse.json"));
+        Re4Native.init(outputFile);
         LOGGER.info("RE4 Bridge: writing HUD data to {}, reading input from {}", outputFile, inputFile);
     }
 
@@ -344,7 +345,7 @@ public class Re4Bridge implements ClientModInitializer {
         return Paths.get(DEFAULT_OUTPUT);
     }
 
-    private static void warnOnce(String what, Exception e) {
+    static void warnOnce(String what, Exception e) {
         if (!warnedWrite) {
             LOGGER.warn("RE4 Bridge: {}", what, e);
             warnedWrite = true;
@@ -378,6 +379,7 @@ public class Re4Bridge implements ClientModInitializer {
         // You play in the RE4 window, so Minecraft must keep running when it loses focus
         mc.options.pauseOnLostFocus = false;
         ticks++;
+        Re4Native.readStatus();   // real RE4 mobs: switched on from RE4, and which parts RE4 has
 
         try {
             if (mc.player != null) {
@@ -405,7 +407,7 @@ public class Re4Bridge implements ClientModInitializer {
         return obj.has(name) && obj.get(name).getAsBoolean();
     }
 
-    private static JsonObject readJson(Path file) {
+    static JsonObject readJson(Path file) {
         if (Files.notExists(file)) {
             return null;
         }

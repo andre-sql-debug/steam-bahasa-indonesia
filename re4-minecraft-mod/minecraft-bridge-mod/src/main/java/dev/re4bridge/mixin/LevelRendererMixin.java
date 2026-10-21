@@ -11,6 +11,7 @@ import com.mojang.blaze3d.vertex.Tesselator;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import dev.re4bridge.Re4Bridge;
 import dev.re4bridge.Re4Enemies;
+import dev.re4bridge.Re4Native;
 import dev.re4bridge.Re4Terrain;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
@@ -169,6 +170,9 @@ public class LevelRendererMixin {
         re4bridge$re4Depth(cam);
         PoseStack poseStack = new PoseStack();
         MultiBufferSource.BufferSource buffers = this.renderBuffers.bufferSource();
+        // Real RE4 mobs: the parts RE4 shows itself are captured instead of drawn (Re4Native)
+        Re4Native.beginFrame(cam);
+        MultiBufferSource entityBuffers = Re4Native.wrap(buffers);
         for (Entity entity : this.level.entitiesForRendering()) {
             boolean self = entity == cameraEntity;
             if ((self && !camera.isDetached()) || entity.isInvisible() || Re4Enemies.isStandIn(entity)
@@ -180,9 +184,17 @@ public class LevelRendererMixin {
             double y = Mth.lerp(partialTick, entity.yOld, entity.getY()) - cam.y;
             double z = Mth.lerp(partialTick, entity.zOld, entity.getZ()) - cam.z;
             float yaw = Mth.lerp(partialTick, entity.yRotO, entity.getYRot());
-            this.entityRenderDispatcher.render(entity, x, y, z, yaw, partialTick, poseStack, buffers, LightTexture.FULL_BRIGHT);
-            re4bridge$re4Shadow(entity, x + cam.x, y + cam.y, z + cam.z, cam, buffers);
+            Re4Native.beginEntity(entity);
+            try {
+                this.entityRenderDispatcher.render(entity, x, y, z, yaw, partialTick, poseStack, entityBuffers, LightTexture.FULL_BRIGHT);
+            } finally {
+                Re4Native.endEntity();
+            }
+            if (!Re4Native.shownByRe4(entity)) {
+                re4bridge$re4Shadow(entity, x + cam.x, y + cam.y, z + cam.z, cam, buffers);   // RE4 casts its own
+            }
         }
+        Re4Native.endFrame();
         // The blocks you built (TNT, glass, chests...), with Minecraft's own models and textures
         BlockRenderDispatcher blockRenderer = Minecraft.getInstance().getBlockRenderer();
         for (BlockPos pos : Re4Bridge.nearbyBlocks()) {
