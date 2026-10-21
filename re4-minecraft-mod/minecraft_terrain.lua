@@ -6,8 +6,10 @@
 --     stepping up, falling, walls).
 --  3. Leon is placed exactly where Minecraft's player is; RE4's own physics for Leon is switched off.
 -- The worlds are lined up by an "anchor": RE4 position = anchor_re4 + (Minecraft position - anchor_mc).
--- A new anchor is made when Minecraft connects, when the game moves Leon (doors, cutscenes, loading),
--- when Minecraft's player loses the terrain, or with F9. F7 gives Leon back to RE4 (ladders, doors).
+-- A new anchor is made when Minecraft connects, when Leon is very far from the anchor, or with F9.
+-- While minecraft_control.lua gives Leon to RE4 (ladders, doors, cutscenes, grabs, menus, F7), RE4 moves
+-- him; afterwards Minecraft's player is moved to where Leon ended up ("sync"), keeping the same anchor so
+-- the blocks you built stay where they were. The same happens when the game moves Leon by itself.
 -- Install: copy this file to <RE4 folder>\reframework\autorun\
 -- Settings: press Insert -> Script Generated UI -> Minecraft Terrain
 
@@ -27,7 +29,12 @@ local RAY_BELOW = 4.0          -- ...and look this far below them
 local WALL_RAY_HEIGHT = 0.9    -- wall rays run this far above each cell's floor
 local REFRESH_SECONDS = 5.0    -- rescan cells older than this (doors, moving things)
 local RECENTER_DISTANCE = 1.5  -- start the scan around Leon again after he moved this far
-local TELEPORT_DISTANCE = 3.0  -- the game moved Leon this far in one frame = new anchor
+local TELEPORT_DISTANCE = 3.0  -- the game moved Leon this far in one frame = move Minecraft's player too
+local FAR_FROM_ANCHOR = 2000.0 -- farther than this sideways = new anchor
+local FAR_ABOVE_BELOW = 60.0   -- this far up or down from the anchor = new anchor (Minecraft only follows
+                               -- the RE4 terrain within 64 blocks of the anchor height)
+local SYNC_TIMEOUT_FRAMES = 120
+local ENEMY_RANGE = 48.0       -- RE4 enemies this close to Leon get a Minecraft stand-in (mobs can fight them)
 local WRITE_EVERY_FRAMES = 6
 local LOST_FRAMES = 60         -- no Minecraft authority for this long while connected = new anchor
 
@@ -49,11 +56,14 @@ local state = {
     leon_set = nil,          -- where we last put Leon
     mc_prev = nil, mc_cur = nil, mc_frame = 0, mc_seq = nil,
     physics_off = false,
-    movement_on = true,
-    f7_was = false, f9_was = false,
+    released = false,        -- RE4 has Leon (see minecraft_control.lua)
+    sync_seq = 0,
+    sync_target = nil,       -- Minecraft position we asked Minecraft's player to move to
+    sync_frames = 0,
+    f9_was = false,
 }
 
-local debug = { layer = "not calibrated", rays_ms = 0, status = "waiting for Minecraft", scanned = 0 }
+local debug = { layer = "not calibrated", rays_ms = 0, status = "waiting for Minecraft", scanned = 0, enemies = 0 }
 
 local function try_call(obj, method, ...)
     local args = { ... }
@@ -258,6 +268,31 @@ local function update_scan(leon_pos)
     debug.scanned = scanned
 end
 
+-- RE4's living enemies near Leon in Minecraft coordinates: "key,x,y,z;..." (key = the enemy's address,
+-- the same key minecraft_gameplay.lua uses to apply the damage Minecraft reports back)
+local function enemies_for_minecraft(leon_pos)
+    local a, m = state.anchor_re4, state.anchor_mc
+    local cm = sdk.get_managed_singleton(sdk.game_namespace("CharacterManager"))
+    local list = cm and try_call(cm, "get_EnemyContextList")
+    local count = list and try_call(list, "get_Count") or 0
+    local parts = {}
+    for i = 0, count - 1 do
+        local enemy = try_call(list, "get_Item", i)
+        local pos = enemy and try_call(enemy, "get_Position")
+        local hp = enemy and try_call(enemy, "get_HitPoint")
+        local current = hp and try_call(hp, "get_CurrentHitPoint")
+        if pos ~= nil and current ~= nil and current > 0 and (pos - leon_pos):length() <= ENEMY_RANGE then
+            local ok, address = pcall(function() return enemy:get_address() end)
+            if ok and address ~= nil then
+                parts[#parts + 1] = string.format("%s,%.2f,%.2f,%.2f", tostring(address),
+                    m.x + (pos.x - a.x), m.y + (pos.y - a.y), m.z + (pos.z - a.z))
+            end
+        end
+    end
+    debug.enemies = #parts
+    return table.concat(parts, ";")
+end
+
 local function write_terrain(leon_pos)
     state.seq = state.seq + 1
     local data = {
@@ -266,6 +301,10 @@ local function write_terrain(leon_pos)
         epoch = state.epoch,
         cell = settings.cell,
     }
+    if state.sync_target ~= nil then
+        local t = state.sync_target
+        data.sync = { seq = state.sync_seq, x = t.x, y = t.y, z = t.z }
+    end
     if state.epoch ~= 0 and state.anchor_re4 ~= nil and state.center ~= nil then
         local a = state.anchor_re4
         local parts = {}
@@ -284,6 +323,7 @@ local function write_terrain(leon_pos)
         data.center = { x = state.center.x, y = state.center.y, z = state.center.z }
         data.radius = math.max(0.1, state.done_radius)
         data.cells = table.concat(parts, ";")
+        if state.anchor_mc ~= nil then data.enemies = enemies_for_minecraft(leon_pos) end
     end
     pcall(json.dump_file, TERRAIN_FILE, data)
 end
@@ -304,7 +344,35 @@ local function request_anchor(reason)
     debug.status = "asking Minecraft for a new anchor (" .. reason .. ")"
 end
 
-local bridge = nil
+local bridge = nil   -- Minecraft's latest state (minecraft_bridge.json)
+
+-- Who has Leon right now (minecraft_control.lua); without that script Minecraft always has him
+local function control_mode()
+    local c = MinecraftRE4Control
+    if type(c) ~= "table" then return "minecraft", "" end
+    return c.mode, c.reason
+end
+
+-- Move Minecraft's player to Leon's spot, keeping the anchor (and so the blocks you built)
+local function request_sync(pos, reason)
+    if state.epoch == 0 or state.anchor_re4 == nil then return end
+    local a, m = state.anchor_re4, state.anchor_mc
+    local target = Vector3f.new(m.x + (pos.x - a.x), m.y + (pos.y - a.y), m.z + (pos.z - a.z))
+    local far = math.abs(target.x - m.x) > FAR_FROM_ANCHOR or math.abs(target.z - m.z) > FAR_FROM_ANCHOR
+    if far or math.abs(target.y - m.y) >= FAR_ABOVE_BELOW then
+        request_anchor(reason .. ", far from the anchor")
+        return
+    end
+    -- Never reuse a number Minecraft already did (this script may have been reset, Minecraft not)
+    local done = bridge and tonumber(bridge.sync_done) or 0
+    state.sync_seq = math.max(state.sync_seq, done) + 1
+    state.sync_target = target
+    state.sync_frames = 0
+    state.authority = false
+    state.mc_prev, state.mc_cur, state.mc_seq = nil, nil, nil
+    debug.status = "moving Minecraft's player to Leon (" .. reason .. ")"
+end
+
 local function read_bridge()
     local ok, d = pcall(json.load_file, BRIDGE_FILE)
     bridge = (ok and type(d) == "table" and d.in_world) and d or nil
@@ -327,7 +395,7 @@ local function minecraft_leon_position()
 end
 
 local function controlling()
-    return settings.enabled and state.movement_on and bridge ~= nil and bridge.re4_control == true
+    return settings.enabled and bridge ~= nil and bridge.re4_control == true
 end
 
 ------------------------------------------------------------------------------
@@ -339,7 +407,6 @@ re.on_pre_application_entry("UpdateBehavior", function()
     state.frame = state.frame + 1
     state.time = state.time + 1 / 60
     read_bridge()
-    if key_pressed(0x76, "f7_was") then state.movement_on = not state.movement_on end
     local f9 = key_pressed(0x78, "f9_was")
 
     local leon = get_leon()
@@ -350,18 +417,45 @@ re.on_pre_application_entry("UpdateBehavior", function()
     end
     if not controlling() then
         set_re4_physics(leon, true)
-        debug.status = bridge == nil and "waiting for Minecraft" or (state.movement_on and "Minecraft isn't getting RE4's keys" or "off (F7)")
+        debug.status = bridge == nil and "waiting for Minecraft" or "Minecraft isn't getting RE4's keys"
         return
     end
 
+    -- RE4's turn (ladder, door, cutscene, grab, menu, F7): RE4 moves Leon; keep scanning around him
+    local mode, reason = control_mode()
+    if mode ~= "minecraft" then
+        if not state.released then
+            state.released = true
+            set_re4_physics(leon, true)
+        end
+        state.leon_set = nil
+        state.sync_target = nil
+        debug.status = "RE4 has Leon (" .. tostring(reason) .. ")"
+    elseif state.released then
+        state.released = false
+        request_sync(pos, "RE4 gave Leon back")
+    end
+
     if state.leon_set ~= nil and (pos - state.leon_set):length() > TELEPORT_DISTANCE then
-        request_anchor("the game moved Leon")
+        request_sync(pos, "the game moved Leon")
     elseif f9 then
         request_anchor("F9")
     elseif state.request_epoch == 0 then
         request_anchor("Minecraft connected")
     end
     state.leon_set = nil
+
+    -- Minecraft moved its player to Leon: follow it again
+    if state.sync_target ~= nil then
+        state.sync_frames = state.sync_frames + 1
+        if bridge.sync_done == state.sync_seq then
+            state.sync_target = nil
+            state.mc_prev, state.mc_cur, state.mc_seq = nil, nil, nil
+        elseif state.sync_frames > SYNC_TIMEOUT_FRAMES then
+            request_anchor("Minecraft didn't move its player")
+            state.sync_target = nil
+        end
+    end
 
     -- Minecraft made the anchor we asked for: Leon's current spot is its match
     if state.epoch == 0 and type(bridge.anchor) == "table" and bridge.anchor.epoch == state.request_epoch then
@@ -378,11 +472,13 @@ re.on_pre_application_entry("UpdateBehavior", function()
         if terrain_layer ~= nil then update_scan(pos) end
     end
 
-    state.authority = state.epoch ~= 0 and bridge.authority == true and bridge.anchor ~= nil and bridge.anchor.epoch == state.epoch
-    if state.epoch ~= 0 and not state.authority then
+    state.authority = state.epoch ~= 0 and bridge.authority == true and bridge.anchor ~= nil
+        and bridge.anchor.epoch == state.epoch and state.sync_target == nil and not state.released
+    if state.epoch ~= 0 and not state.authority and not state.released and state.sync_target == nil then
         state.lost_frames = state.lost_frames + 1
         if state.lost_frames > LOST_FRAMES and (bridge.terrain_boxes or 0) > 0 then
-            request_anchor("Minecraft's player lost the terrain")
+            request_sync(pos, "Minecraft's player lost the terrain")
+            state.lost_frames = 0
         end
     else
         state.lost_frames = 0
@@ -390,6 +486,18 @@ re.on_pre_application_entry("UpdateBehavior", function()
 
     if state.frame % WRITE_EVERY_FRAMES == 0 then write_terrain(pos) end
 end)
+
+-- Leon faces where you look, so RE4's "interact" (F: ladders, doors, items) works on what you look at
+local function face_camera_direction(leon)
+    local camera = sdk.get_primary_camera()
+    local ok, forward = pcall(function()
+        return camera:call("get_GameObject"):call("get_Transform"):call("get_Rotation") * Vector3f.new(0, 0, -1)
+    end)
+    if not ok or forward == nil or (forward.x == 0 and forward.z == 0) then return end
+    local half = math.atan(forward.x, forward.z) * 0.5   -- Leon's model looks along its +Z
+    local ok_q, rot = pcall(function() return Quaternion.new(math.cos(half), 0, math.sin(half), 0) end)
+    if ok_q and rot ~= nil then try_call(leon.transform, "set_Rotation", rot) end
+end
 
 -- After RE4's own update: put Leon where Minecraft's player is
 local function place_leon()
@@ -404,6 +512,7 @@ local function place_leon()
     if leon == nil or leon.transform == nil or target == nil then return end
     set_re4_physics(leon, false)
     try_call(leon.transform, "set_Position", target)
+    face_camera_direction(leon)
     state.leon_set = target
     debug.status = "Minecraft physics on RE4 terrain"
 end
@@ -437,12 +546,13 @@ re.on_draw_ui(function()
         changed, settings.cells_per_frame = imgui.slider_int("Cells scanned per frame", settings.cells_per_frame, 10, 200)
         changed, settings.show_grid = imgui.checkbox("Show scanned grid", settings.show_grid)
         imgui.text("Status: " .. debug.status)
-        imgui.text("F7 = give Leon back to RE4 / take him again,  F9 = re-anchor here")
+        imgui.text("F7 = everything to RE4 / back to Minecraft,  F9 = re-anchor here")
         changed, settings.show_debug = imgui.checkbox("Show debug info", settings.show_debug)
         if settings.show_debug then
             imgui.text("Ground layer: " .. debug.layer)
             imgui.text(string.format("Anchor epoch %d (asked %d), scanned radius %.1f m", state.epoch, state.request_epoch, state.done_radius))
             imgui.text(string.format("This frame: %d cells, %.2f ms", debug.scanned, debug.rays_ms))
+            imgui.text(string.format("RE4 enemies sent to Minecraft: %d", debug.enemies))
             if bridge ~= nil then
                 imgui.text(string.format("Minecraft: authority %s, %s terrain boxes", tostring(bridge.authority), tostring(bridge.terrain_boxes)))
             end

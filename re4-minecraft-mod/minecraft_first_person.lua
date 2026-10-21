@@ -7,6 +7,8 @@
 -- the third-person views show your Minecraft character (drawn by Minecraft) instead of Leon. RE4's
 -- camera is put exactly where Minecraft's camera is, with Minecraft's field of view, so they line up.
 -- Without Minecraft, F5 switches between first person and the normal RE4 camera.
+-- During RE4's turn (cutscenes, grabs, menus, F7: see minecraft_control.lua) RE4's own camera is used and
+-- Leon is shown.
 -- Install: copy this file to <RE4 folder>\reframework\autorun\
 -- Settings: press Insert -> Script Generated UI -> Minecraft First Person
 
@@ -159,7 +161,8 @@ local function hide_renderers_of(go)
         if is_renderer(component) then
             local ok_addr, address = pcall(function() return component:get_address() end)
             local key = ok_addr and address or tostring(component)
-            if hidden_renderers[key] == nil then
+            -- Also when the game switched it back on (cutscenes show and hide Leon's parts themselves)
+            if hidden_renderers[key] == nil or try_call(component, "get_Enabled") == true then
                 try_call(component, "set_Enabled", false)
                 hidden_renderers[key] = component
             end
@@ -179,11 +182,17 @@ local function leon_objects()
     return objects
 end
 
+-- Your Minecraft character plays Leon in this cutscene (minecraft_cutscenes.lua): keep Leon hidden
+local function puppet_on()
+    local c = MinecraftRE4Control
+    return type(c) == "table" and c.puppet == true
+end
+
 local function set_head_hidden(hidden, transform)
     hide_frame = hide_frame + 1
     if hidden then
         -- Rescan now and then: weapons and gear get attached and swapped during play
-        if not head_hidden or hide_frame - last_hide_scan >= 120 then
+        if not head_hidden or hide_frame - last_hide_scan >= (puppet_on() and 10 or 120) then
             last_hide_scan = hide_frame
             for _, go in ipairs(leon_objects()) do
                 hide_renderers_of(go)
@@ -271,6 +280,13 @@ local function read_bridge()
     end
 end
 
+-- RE4's turn (minecraft_control.lua): hands off the camera, Leon shown
+local function re4_turn()
+    local c = MinecraftRE4Control
+    return type(c) == "table" and c.mode == "re4"
+end
+
+
 -- Minecraft is running and takes RE4's input (so it also follows F5)
 local function minecraft_live()
     return frame_counter <= bridge_live_until
@@ -339,7 +355,11 @@ end
 local function update_look(cam_transform)
     local dx, dy = read_mouse()
     local rot = try_call(cam_transform, "get_Rotation")
-    if look.yaw == nil or frame_counter > mouse.alive_until then
+    if re4_turn() then
+        -- RE4 turns its camera; carry on from where it looks when Minecraft takes over again
+        if rot ~= nil then look_from_rotation(rot) end
+        debug.look = "RE4's camera (RE4's turn)"
+    elseif look.yaw == nil or frame_counter > mouse.alive_until then
         -- No raw mouse (plugin missing) or just started: follow RE4's camera
         if rot ~= nil then look_from_rotation(rot) end
         debug.look = "RE4 camera rotation (no raw mouse)"
@@ -356,8 +376,8 @@ local function update_look(cam_transform)
 end
 
 -- Minecraft's FOV is vertical; RE4's camera is told to read it that way too
-local function apply_fov(camera)
-    local use = settings.minecraft_fov and settings.minecraft_camera and minecraft_live() and mc_camera.fov ~= nil
+local function apply_fov(camera, allowed)
+    local use = allowed and settings.minecraft_fov and settings.minecraft_camera and minecraft_live() and mc_camera.fov ~= nil
     if use then
         if re4_fov == nil then
             re4_fov = { fov = try_call(camera, "get_FOV"), vertical = try_call(camera, "get_VerticalEnable") }
@@ -383,7 +403,8 @@ local function update_camera(stage)
     -- Only change meshes during the game update, never while a frame is being prepared for drawing
     if stage == "LateUpdateBehavior" then
         local third = minecraft_view_mode() ~= 0
-        set_head_hidden(settings.first_person and settings.hide_head and not (third and not minecraft_picture_shown()), transform)
+        set_head_hidden(puppet_on() or (settings.first_person and settings.hide_head and not re4_turn()
+            and not (third and not minecraft_picture_shown())), transform)
     end
 
     local selected = STAGES[settings.stage]
@@ -395,6 +416,11 @@ local function update_camera(stage)
     local cam_transform = cam_obj and try_call(cam_obj, "get_Transform")
     if cam_transform == nil then
         debug.camera = "camera not found"
+        return
+    end
+    if re4_turn() then
+        apply_fov(camera, false)
+        debug.camera = "RE4's camera (RE4's turn)"
         return
     end
 
@@ -445,7 +471,7 @@ local function update_camera(stage)
     end
 
     try_call(cam_transform, "set_Position", new_pos)
-    apply_fov(camera)
+    apply_fov(camera, true)
     debug.camera = "moved (camera: " .. tostring(try_call(cam_obj, "get_Name")) .. ")"
     debug.last_stage = stage
 end

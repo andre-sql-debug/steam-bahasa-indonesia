@@ -64,6 +64,17 @@ public final class OverlayStreamer {
         }
     }
 
+    /**
+     * Tells the RE4 plugin which input RE4 gets: 0 = none of Minecraft's (Minecraft has the mouse and its
+     * movement keys), 1 = the movement keys (RE4 moves Leon: ladders, the boat), 2 = everything (RE4's
+     * turn while your character plays Leon in a cutscene).
+     */
+    public static void setInputToRe4(int mode) {
+        if (buffer != null) {
+            INT.setRelease(buffer, 32, mode);
+        }
+    }
+
     /** Called after Minecraft has drawn its HUD for this frame. */
     public static void capture(Minecraft mc) {
         if (buffer == null) {

@@ -9,8 +9,11 @@
 -- Without Minecraft: a built-in copy of Minecraft's movement numbers is used instead.
 --
 -- Controls (same as Minecraft): WASD walk, Ctrl sprint, Shift sneak, Space jump,
--- double-tap Space to fly in Creative, left-click attack. F7 = Minecraft movement off/on
--- (for ladders and doors). Without Minecraft, F6 also toggles flying.
+-- double-tap Space to fly in Creative, left-click attack, bows and crossbows (hold right-click) shoot
+-- what the crosshair is on. Ladders, doors, cutscenes, grabs and menus are handed to RE4 automatically
+-- (minecraft_control.lua; F7 = everything to RE4). Without Minecraft, F6 toggles flying.
+-- Enemy health: normal enemies take hits like a 20-health Minecraft zombie; tougher ones (bosses) get
+-- more, compared to the usual enemy health seen so far (up to 300, like the Wither).
 -- Install: copy this file to <RE4 folder>\reframework\autorun\ (replaces minecraft_creative.lua)
 -- Settings: press Insert -> Script Generated UI -> Minecraft Gameplay
 
@@ -48,7 +51,11 @@ local SETTLE_FRAMES_AFTER_LOAD = 180      -- ~3 s
 local SETTLE_FRAMES_AFTER_TELEPORT = 60   -- ~1 s
 local TELEPORT_DISTANCE = 2.0             -- meters in one frame that only the game itself does
 local JUMP_PREDICT_SECONDS = 0.15   -- how long we show a predicted jump before Minecraft confirms it
-local MOB_HEALTH = 20          -- RE4 enemies take damage as if they were zombies (20 health)
+local MOB_HEALTH = 20          -- RE4 enemies take damage as if they were zombies (20 health)...
+local MAX_MOB_HEALTH = 300     -- ...bosses up to the Wither's health
+local ARROW_RANGE = 64.0       -- meters
+local ARROW_WIDTH = 0.8        -- how far from the aim line an enemy still gets hit (meters)
+local ARROW_BIG_ANGLE = 0.12   -- otherwise: within ~7 degrees of the aim (huge enemies like Del Lago)
 
 -- Fallback weapon stats without Minecraft: damage, attacks per second
 local WEAPONS = {
@@ -521,6 +528,41 @@ end
 -- Combat
 ------------------------------------------------------------------------------
 
+-- How tough enemies usually are: the middle max health among the enemies seen (each enemy counted once)
+local max_hp_counts = {}
+local max_hp_seen = {}   -- enemy address -> true
+local function note_max_hp(max, enemy)
+    if max == nil or max <= 0 then return end
+    local ok, address = pcall(function() return enemy:get_address() end)
+    if not ok or address == nil or max_hp_seen[address] then return end
+    max_hp_seen[address] = true
+    local key = math.floor(max + 0.5)
+    max_hp_counts[key] = (max_hp_counts[key] or 0) + 1
+end
+
+local function typical_max_hp()
+    local list, total = {}, 0
+    for value, count in pairs(max_hp_counts) do
+        table.insert(list, { value, count })
+        total = total + count
+    end
+    if total == 0 then return nil end
+    table.sort(list, function(a, b) return a[1] < b[1] end)
+    local half, seen = total / 2, 0
+    for _, entry in ipairs(list) do
+        seen = seen + entry[2]
+        if seen >= half then return entry[1] end
+    end
+    return list[#list][1]
+end
+
+-- Minecraft health of an enemy: 20 for usual enemies, more for tougher ones (bosses)
+local function mob_health(max)
+    local typical = typical_max_hp()
+    if typical == nil or max == nil or typical <= 0 then return MOB_HEALTH end
+    return math.max(MOB_HEALTH, math.min(MAX_MOB_HEALTH, MOB_HEALTH * max / typical))
+end
+
 -- The HitPoint of the enemy closest to the crosshair within reach, and how many enemies are loaded
 local function find_target()
     local _, _, look, _, cam_pos = camera_vectors()
@@ -536,6 +578,7 @@ local function find_target()
         local hp = enemy and try_call(enemy, "get_HitPoint")
         local current = hp and try_call(hp, "get_CurrentHitPoint")
         if pos ~= nil and current ~= nil and current > 0 then
+            note_max_hp(try_call(hp, "get_DefaultHitPoint"), enemy)
             local to = (pos + Vector3f.new(0, 1.0, 0)) - cam_pos
             local dist = math.sqrt(to.x * to.x + to.y * to.y + to.z * to.z)
             if dist <= MC.reach + 0.6 and dist > 0.01 then
@@ -549,37 +592,132 @@ local function find_target()
     return best_hp, count
 end
 
--- damage is in Minecraft half-hearts; RE4 enemies lose damage/20 of their max health
+-- The enemy the crosshair is on, up to ARROW_RANGE away (for arrows)
+local function find_ranged_target()
+    local _, _, look, _, cam_pos = camera_vectors()
+    if look == nil or cam_pos == nil then return nil, 0 end
+    local cm = get_character_manager()
+    local list = cm and try_call(cm, "get_EnemyContextList")
+    local count = list and try_call(list, "get_Count") or 0
+    local best_hp, best_along = nil, math.huge
+    local best_angle_hp, best_angle = nil, math.huge
+    for i = 0, count - 1 do
+        local enemy = try_call(list, "get_Item", i)
+        local pos = enemy and try_call(enemy, "get_Position")
+        local hp = enemy and try_call(enemy, "get_HitPoint")
+        local current = hp and try_call(hp, "get_CurrentHitPoint")
+        if pos ~= nil and current ~= nil and current > 0 then
+            local to = (pos + Vector3f.new(0, 1.0, 0)) - cam_pos
+            local along = to.x * look.x + to.y * look.y + to.z * look.z
+            if along > 0.5 and along <= ARROW_RANGE then
+                local off = to - look * along
+                local miss = math.sqrt(off.x * off.x + off.y * off.y + off.z * off.z)
+                -- tall enemies: allow more up and down than sideways
+                if miss <= ARROW_WIDTH + math.abs(off.y) * 0.5 and along < best_along then
+                    best_hp, best_along = hp, along
+                end
+                -- Big enemies (Del Lago, El Gigante) reach far from their center point: aim within a few degrees
+                local angle = miss / along
+                if angle < best_angle then
+                    best_angle_hp, best_angle = hp, angle
+                end
+            end
+        end
+    end
+    if best_hp == nil and best_angle <= ARROW_BIG_ANGLE then return best_angle_hp, count end
+    return best_hp, count
+end
+
+-- damage is in Minecraft half-hearts; RE4 enemies lose damage/(their Minecraft health) of their max health
+local function damage_enemy(hp, damage, note)
+    local current = try_call(hp, "get_CurrentHitPoint")
+    local max = try_call(hp, "get_DefaultHitPoint") or current
+    local health = mob_health(max)
+    local new_hp = math.max(0, math.floor(current - max * damage / health))
+    try_call(hp, "set_CurrentHitPoint", new_hp)
+    if try_call(hp, "get_CurrentHitPoint") ~= new_hp then
+        pcall(function() hp:set_field("<CurrentHitPoint>k__BackingField", new_hp) end)
+    end
+    debug.combat = string.format("hit for %.1f%s: enemy HP %s -> %s (as a %d-health mob)", damage, note,
+        tostring(current), tostring(try_call(hp, "get_CurrentHitPoint")), math.floor(health))
+end
+
 local function hit_enemy(damage, note)
     local hp, count = find_target()
     if hp == nil then
         debug.combat = string.format("swing, no enemy in reach (%d enemies loaded)", count or 0)
         return
     end
-    local current = try_call(hp, "get_CurrentHitPoint")
-    local max = try_call(hp, "get_DefaultHitPoint") or current
-    local new_hp = math.max(0, math.floor(current - max * damage / MOB_HEALTH))
-    try_call(hp, "set_CurrentHitPoint", new_hp)
-    if try_call(hp, "get_CurrentHitPoint") ~= new_hp then
-        pcall(function() hp:set_field("<CurrentHitPoint>k__BackingField", new_hp) end)
+    damage_enemy(hp, damage, note)
+end
+
+-- The enemy with this key (its address, see minecraft_terrain.lua)
+local function enemy_hp_by_key(key)
+    local cm = get_character_manager()
+    local list = cm and try_call(cm, "get_EnemyContextList")
+    local count = list and try_call(list, "get_Count") or 0
+    for i = 0, count - 1 do
+        local enemy = try_call(list, "get_Item", i)
+        local ok, address = pcall(function() return enemy:get_address() end)
+        if ok and tostring(address) == key then return try_call(enemy, "get_HitPoint") end
     end
-    debug.combat = string.format("hit for %.1f%s: enemy HP %s -> %s", damage, note,
-        tostring(current), tostring(try_call(hp, "get_CurrentHitPoint")))
+    return nil
+end
+
+-- Minecraft mobs (iron golems, wolves...) and your sword hit RE4 enemies through their Minecraft
+-- stand-ins; Minecraft sends the total damage per enemy, apply what is new
+local enemy_damage_seen = nil   -- key -> total already applied; the first read is from before we started
+local function update_enemy_damage()
+    local totals = bridge.enemy_damage
+    if type(totals) ~= "table" then return end
+    local first = enemy_damage_seen == nil
+    enemy_damage_seen = enemy_damage_seen or {}
+    for key, total in pairs(totals) do
+        local before = enemy_damage_seen[key] or (first and total or 0)
+        enemy_damage_seen[key] = total
+        if type(total) == "number" and total > before then
+            local hp = enemy_hp_by_key(key)
+            local current = hp and try_call(hp, "get_CurrentHitPoint")
+            if current ~= nil and current > 0 then damage_enemy(hp, total - before, " (in Minecraft)") end
+        end
+    end
+end
+
+local function shoot_enemy(damage, note)
+    local hp, count = find_ranged_target()
+    if hp == nil then
+        debug.combat = string.format("arrow missed (%d enemies loaded)", count or 0)
+        return
+    end
+    damage_enemy(hp, damage, note)
 end
 
 -- Minecraft calculated an attack (cooldown, weapon, crits); apply it when a new one shows up
 local function update_minecraft_combat()
+    update_enemy_damage()
+
+    -- Melee: a new attack calculated by Minecraft (the first one seen is from before we started)
     local attack = bridge.attack
-    if type(attack) ~= "table" or attack.seq == nil then return end
-    if state.last_attack_seq == nil then
-        state.last_attack_seq = attack.seq
-        return
+    if type(attack) == "table" and attack.seq ~= nil then
+        if state.last_attack_seq == nil then
+            state.last_attack_seq = attack.seq
+        elseif attack.seq ~= state.last_attack_seq then
+            state.last_attack_seq = attack.seq
+            local note = string.format(" (Minecraft, charge %d%%%s)", math.floor((attack.strength or 0) * 100),
+                attack.crit and ", critical!" or "")
+            hit_enemy(attack.damage or 0, note)
+        end
     end
-    if attack.seq ~= state.last_attack_seq then
-        state.last_attack_seq = attack.seq
-        local note = string.format(" (Minecraft, charge %d%%%s)", math.floor((attack.strength or 0) * 100),
-            attack.crit and ", critical!" or "")
-        hit_enemy(attack.damage or 0, note)
+
+    -- Arrows from bows and crossbows, with Minecraft's arrow damage
+    local shot = bridge.shot
+    if type(shot) == "table" and shot.seq ~= nil then
+        if state.last_shot_seq == nil then
+            state.last_shot_seq = shot.seq
+        elseif shot.seq ~= state.last_shot_seq then
+            state.last_shot_seq = shot.seq
+            shoot_enemy(shot.damage or 0, shot.crit and " (arrow, critical!)" or " (arrow)")
+        end
     end
 end
 
@@ -717,7 +855,8 @@ re.on_pre_application_entry("UpdatePhysicsCharacterController", function()
     state.time = state.time + dt
 
     if settings.no_damage then keep_full_health(player) end
-    if pressed(KEY.F7) and not menu_open() then settings.movement = not settings.movement end
+    local control = MinecraftRE4Control
+    local re4_has_leon = type(control) == "table" and control.mode ~= "minecraft"
 
     if state.frame < state.settle_until then
         -- Give everything back to the game while it loads or teleports Leon
@@ -734,11 +873,14 @@ re.on_pre_application_entry("UpdatePhysicsCharacterController", function()
     if minecraft_in_control() then
         debug.mode = "Minecraft (movement and attacks come from Minecraft)"
         if state.flying then set_flying(player, false) end
-        if settings.movement then
+        if re4_has_leon then
+            set_vertical(player, nil)
+            debug.movement = "RE4 has Leon (" .. tostring(control.reason) .. ")"
+        elseif settings.movement then
             update_from_minecraft(player, dt)
         else
             set_vertical(player, nil)
-            debug.movement = "off (F7)"
+            debug.movement = "off"
         end
         if settings.combat then update_minecraft_combat() end
         return
@@ -758,12 +900,15 @@ re.on_pre_application_entry("UpdatePhysicsCharacterController", function()
     end
     if toggle_fly then set_flying(player, not state.flying) end
 
-    if state.flying then
+    if re4_has_leon then
+        if state.flying then set_flying(player, false) end
+        debug.movement = "RE4 has Leon (" .. tostring(control.reason) .. ")"
+    elseif state.flying then
         update_builtin_flying(player, dt)
     elseif settings.movement then
         update_builtin_walking(player, dt)
     else
-        debug.movement = "off (F7)"
+        debug.movement = "off"
     end
 
     if settings.combat and mouse_clicked() then builtin_attack() end
@@ -772,7 +917,7 @@ end)
 re.on_draw_ui(function()
     if imgui.tree_node("Minecraft Gameplay") then
         local changed
-        changed, settings.movement = imgui.checkbox("Minecraft movement (F7)", settings.movement)
+        changed, settings.movement = imgui.checkbox("Minecraft movement", settings.movement)
         changed, settings.combat = imgui.checkbox("Melee combat (left-click)", settings.combat)
         changed, settings.no_damage = imgui.checkbox("No damage", settings.no_damage)
         changed, settings.swap_left_right = imgui.checkbox("Swap left/right (if A and D are backwards)", settings.swap_left_right)

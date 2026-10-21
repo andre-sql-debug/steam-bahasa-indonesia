@@ -11,6 +11,21 @@ raycasts and sent to Minecraft, which adds them as collision boxes for its playe
 its own world). Minecraft's physics then decides everything: walking, jumping, stairs and ramps, walls,
 falling; Leon is just placed where the Minecraft player is.
 
+**Story mode**: RE4 gets Leon back whenever the story needs it, by reading RE4's own player flags
+(`minecraft_control.lua`). Ladders, windows, jumping down, doors, kicks, elevators, the boat and rides:
+RE4 moves Leon while Minecraft's first-person view, mouse and bow stay (shoot from the boat).
+Cutscenes, grabs/QTEs, the merchant, radio calls and menus: RE4's turn (its camera, keys, mouse and
+prompts), and **your Minecraft character plays Leon in cutscenes** (`minecraft_cutscenes.lua`: drawn by
+Minecraft through RE4's cutscene camera, walking and turning with Leon, arms and legs following his).
+Afterwards Minecraft's player is moved to where Leon ended up, keeping the world mapping so the blocks
+you built stay put.
+
+**Minecraft in RE4**: spawn eggs and blocks work on RE4's ground; Minecraft's mobs, dropped items,
+arrows and particles are drawn into RE4. Each RE4 enemy near Leon has an (unseen) Minecraft stand-in,
+so iron golems, tamed wolves and your sword fight RE4's enemies; Minecraft's damage is applied to the
+real enemy. Bows and crossbows (hold right-click) hit what the crosshair is on. Bosses get more health
+(up to the Wither's 300) than normal enemies (a zombie's 20).
+
 ```
 Minecraft 1.21.1 + RE4 Bridge mod  --writes-->  RE4\reframework\data\minecraft_bridge.json        --read by-->  minecraft_bridge_hud.lua
 Minecraft 1.21.1 + RE4 Bridge mod  <--reads--   RE4\reframework\data\minecraft_bridge_input.json  <--writes--  minecraft_bridge_hud.lua
@@ -30,8 +45,10 @@ on a see-through background, at RE4's half resolution with GUI scale 2 and 60 FP
 REFramework plugin (`re4-overlay-plugin/`, built with MinGW-w64 via `build.sh`) draws it over RE4. So the
 HUD, held items, swing animations, item names and attack indicator are Minecraft's own. Keep the Minecraft
 window open behind RE4 (not minimized). The Lua HUD only draws its own copy when the plugin isn't running.
-While Minecraft is in control, the plugin keeps the mouse away from RE4 (no aiming or RE4 camera
-turning); **F7** gives the mouse and movement back to RE4 (doors, ladders, menus) and takes them again.
+While Minecraft is in control, the plugin keeps the mouse and Minecraft's movement keys (WASD, Space,
+Shift, Ctrl, E, Q, 1-9) away from RE4, so Leon doesn't aim, ready his knife or run on his own. During RE4's
+turn (cutscenes, menus, **F7**) RE4 gets everything again; while RE4 moves Leon (ladders, the boat) it
+gets the movement keys.
 
 ## RE4 side
 Requirements: RE4 Remake on PC (Steam) and [REFramework](https://github.com/praydog/REFramework-nightly/releases)
@@ -53,13 +70,16 @@ Copy the `.lua` files into `<RE4 game folder>\reframework\autorun\`. Settings: p
   Leon's feet (1.62 m, 1.27 m sneaking), turned only by the raw mouse (read by the overlay plugin) with
   Minecraft's sensitivity formula and your Minecraft sensitivity setting. Draws a `+` crosshair only when
   Minecraft isn't drawing its own.
+- `minecraft_control.lua`: decides who has Leon (story mode, see above). **F7** = everything to RE4 and back.
+  Menus are detected from Tab / I / M / Esc. Debug: Script Generated UI → Minecraft Control.
+- `minecraft_cutscenes.lua`: your Minecraft character in cutscenes (see above).
 - `minecraft_terrain.lua`: terrain mode (see above). Scans a 10 m radius around Leon in 0.5 m cells and
-  places Leon where Minecraft's player is. **F7** gives Leon back to RE4 (ladders, doors, cutscenes),
-  **F9** re-anchors the two worlds. Debug: Script Generated UI → Minecraft Terrain.
+  places Leon where Minecraft's player is, facing where you look (so RE4's **F** interacts with what you
+  look at). Sends RE4's enemies near Leon to Minecraft. **F9** re-anchors the two worlds.
+  Debug: Script Generated UI → Minecraft Terrain.
 - `minecraft_gameplay.lua`: copies the Minecraft player's movement (walking, sprinting, sneaking, jumping,
   Creative flying) to Leon and applies Minecraft's attack damage (cooldown, crits) to the enemy in front of
   you. Without Minecraft it falls back to built-in Minecraft movement numbers. Also: no damage for Leon.
-  **F7** turns Minecraft movement off (for ladders and doors).
 - `minecraft_blocks.lua`: shows the blocks you build in Minecraft as 3D cubes in RE4. **Right-click** places
   (Minecraft's own "use"), **left-click** breaks (Minecraft's mining). Minecraft's player looks where Leon
   looks, and is pulled back next to Leon when RE4 walls stop him. **F9** re-anchors the two worlds.
@@ -69,7 +89,7 @@ Copy the `.lua` files into `<RE4 game folder>\reframework\autorun\`. Settings: p
 A client-only Fabric mod for Minecraft Java **1.21.1**.
 
 1. Install a Java 21 JDK (e.g. Eclipse Temurin 21).
-2. Build: in `minecraft-bridge-mod`, run `gradlew.bat build` (Windows). The mod is `build\libs\re4bridge-0.7.0.jar`.
+2. Build: in `minecraft-bridge-mod`, run `gradlew.bat build` (Windows). The mod is `build\libs\re4bridge-0.8.0.jar`.
 3. Install Fabric Loader for 1.21.1 (Fabric installer, or a Fabric 1.21.1 profile in the CurseForge/Modrinth app)
    and put the jar in that profile's `mods` folder.
 4. Start Minecraft once. `config\re4bridge.txt` holds the path of the file it writes; change it if RE4 is

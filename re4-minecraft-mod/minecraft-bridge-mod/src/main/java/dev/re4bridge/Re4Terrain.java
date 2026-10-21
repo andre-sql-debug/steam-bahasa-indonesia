@@ -1,7 +1,10 @@
 package dev.re4bridge;
 
 import com.google.gson.JsonObject;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.Shapes;
 import net.minecraft.world.phys.shapes.VoxelShape;
@@ -85,8 +88,17 @@ public final class Re4Terrain {
 
     /** Collision shapes near an area, for Minecraft's Entity.collide. */
     public static List<VoxelShape> shapesNear(AABB area) {
-        Snapshot s = snapshot;
         List<VoxelShape> out = new ArrayList<>();
+        for (AABB box : boxesNear(area)) {
+            out.add(Shapes.create(box));
+        }
+        return out;
+    }
+
+    /** Terrain boxes touching an area. */
+    public static List<AABB> boxesNear(AABB area) {
+        Snapshot s = snapshot;
+        List<AABB> out = new ArrayList<>();
         if (s == null) {
             return out;
         }
@@ -99,8 +111,9 @@ public final class Re4Terrain {
                     continue;
                 }
                 for (AABB box : boxes) {
-                    if (box.intersects(area)) {
-                        out.add(Shapes.create(box));
+                    // A box spanning several buckets is listed in each of them; add it once
+                    if (box.intersects(area) && !out.contains(box)) {
+                        out.add(box);
                     }
                 }
             }
@@ -112,8 +125,7 @@ public final class Re4Terrain {
     public static double clipDistance(Vec3 from, Vec3 to) {
         double best = -1.0;
         AABB area = new AABB(from, to).inflate(0.5);
-        for (VoxelShape shape : shapesNear(area)) {
-            AABB box = shape.bounds();
+        for (AABB box : boxesNear(area)) {
             if (box.contains(from)) {
                 continue;
             }
@@ -126,6 +138,44 @@ public final class Re4Terrain {
             }
         }
         return best;
+    }
+
+    /**
+     * Looking at RE4's ground or walls, as a Minecraft block hit: the block just in front of the surface, so
+     * blocks are placed and spawn eggs used there like on a real block. Null when no terrain is in the way.
+     */
+    public static BlockHitResult clipHit(Vec3 from, Vec3 to) {
+        List<AABB> boxes = new ArrayList<>();
+        for (AABB box : boxesNear(new AABB(from, to).inflate(0.5))) {
+            if (!box.contains(from)) {
+                boxes.add(box);
+            }
+        }
+        if (boxes.isEmpty()) {
+            return null;
+        }
+        BlockHitResult hit = AABB.clip(boxes, from, to, BlockPos.ZERO);
+        if (hit == null) {
+            return null;
+        }
+        Vec3 at = hit.getLocation();
+        Direction face = hit.getDirection();
+        BlockPos pos = BlockPos.containing(at.x + face.getStepX() * 0.01, at.y + face.getStepY() * 0.01, at.z + face.getStepZ() * 0.01);
+        return new BlockHitResult(at, face, pos, false);
+    }
+
+    /**
+     * When something stands partly inside the terrain (a mob from a spawn egg lands on a whole block, RE4's
+     * floor is in between), the height to lift it to; NaN when it is fine.
+     */
+    public static double liftOutOf(double x, double y, double z, double tolerance) {
+        double top = Double.NaN;
+        for (AABB box : boxesNear(new AABB(x - 0.01, y, z - 0.01, x + 0.01, y + tolerance, z + 0.01))) {
+            if (box.minY < y + 0.001 && box.maxY > y + 0.001 && box.maxY - y <= tolerance && (Double.isNaN(top) || box.maxY > top)) {
+                top = box.maxY;
+            }
+        }
+        return top;
     }
 
     private static long key(int bx, int bz) {

@@ -2,7 +2,9 @@
 // It also reads the raw mouse (movement and buttons) and writes it to
 // reframework\data\minecraft_mouse.json every frame, so the Lua scripts can do Minecraft-style
 // mouse look without RE4's own camera behavior. While Minecraft is in control, RE4 itself doesn't
-// get the mouse (no aiming, no camera turning); F7 gives the mouse back to RE4 and takes it again.
+// get the mouse (no aiming, no camera turning) or Minecraft's movement keys (Space would ready Leon's
+// knife, Shift run, E crouch...). During RE4's turn (cutscenes, menus, F7 in minecraft_control.lua) the
+// Minecraft mod marks its picture inactive, and RE4 gets everything again.
 //
 // The RE4 Bridge Minecraft mod renders only its hand, held item and HUD on a see-through
 // background and writes every frame into reframework\data\minecraft_overlay.bin. This plugin
@@ -13,7 +15,9 @@
 //   0  u32 magic 'R4MC'     4  u32 version (1)
 //   8  u32 width           12  u32 height
 //  16  u32 latest slot (0/1, written last)   20  u32 active (1 while Minecraft streams)
-//  24  u64 frame counter   32..63 reserved
+//  24  u64 frame counter   32  u32 input to RE4: 0 = none of Minecraft's (mouse + movement keys stay
+//      with Minecraft), 1 = movement keys (RE4 moves Leon: ladders, the boat), 2 = everything (a cutscene
+//      where your Minecraft character plays Leon)   36..63 reserved
 //  64  slot 0, then slot 1: width*height RGBA8 pixels each, bottom row first (OpenGL order),
 //      each slot sized for the maximum 1920x1080
 //
@@ -124,8 +128,8 @@ SharedFrame g_shared;
 
 // True while Minecraft streams its picture (RE4 is in control of Minecraft); set by the renderer
 volatile LONG g_minecraft_active = 0;
-// F7 toggles whether RE4 gets the mouse while Minecraft is active
-volatile LONG g_keep_mouse_from_re4 = 1;
+// Which input RE4 gets while Minecraft is drawn: see "input to RE4" in the file layout above
+volatile LONG g_input_to_re4 = 0;
 
 // ---------------------------------------------------------------------------------------------
 // D3D12 drawing
@@ -498,6 +502,7 @@ struct Renderer {
             return;   // Minecraft stopped (closed or frozen): show nothing
         }
         InterlockedExchange(&g_minecraft_active, 1);
+        InterlockedExchange(&g_input_to_re4, (LONG)s.u32(32));
 
         UINT w = s.u32(8), h = s.u32(12);
         if (w == 0 || h == 0 || w > MAX_WIDTH || h > MAX_HEIGHT) return;
@@ -592,13 +597,35 @@ volatile LONG64 g_right_presses = 0;
 volatile LONG g_left_down = 0;
 volatile LONG g_right_down = 0;
 
+// Keys Minecraft uses for moving and its hotbar. While Minecraft has Leon, RE4 must not act on them too
+// (Space readies the knife, Shift runs, Ctrl, E crouches, Q turns around, 1-9 switch weapons).
+bool is_minecraft_key(UINT vk) {
+    switch (vk) {
+    case 'W': case 'A': case 'S': case 'D': case 'E': case 'Q':
+    case VK_SPACE: case VK_SHIFT: case VK_LSHIFT: case VK_RSHIFT:
+    case VK_CONTROL: case VK_LCONTROL: case VK_RCONTROL:
+        return true;
+    default:
+        return vk >= '1' && vk <= '9';
+    }
+}
+
 bool on_message(void* hwnd, unsigned int msg, unsigned long long wparam, long long lparam) {
+    // What this raw input is, for deciding below whether RE4 gets it
+    bool raw_mouse = false, raw_release = false, raw_minecraft_key = false;
     if (msg == WM_INPUT) {
         RAWINPUT raw{};
         UINT size = sizeof(raw);
-        if (GetRawInputData((HRAWINPUT)lparam, RID_INPUT, &raw, &size, sizeof(RAWINPUTHEADER)) != (UINT)-1 &&
-            raw.header.dwType == RIM_TYPEMOUSE) {
+        bool got = GetRawInputData((HRAWINPUT)lparam, RID_INPUT, &raw, &size, sizeof(RAWINPUTHEADER)) != (UINT)-1;
+        if (got && raw.header.dwType == RIM_TYPEKEYBOARD) {
+            raw_minecraft_key = is_minecraft_key(raw.data.keyboard.VKey);
+            raw_release = (raw.data.keyboard.Flags & RI_KEY_BREAK) != 0;
+        } else if (got && raw.header.dwType == RIM_TYPEMOUSE) {
+            raw_mouse = true;
             const RAWMOUSE& m = raw.data.mouse;
+            const USHORT ups = RI_MOUSE_LEFT_BUTTON_UP | RI_MOUSE_RIGHT_BUTTON_UP | RI_MOUSE_MIDDLE_BUTTON_UP |
+                               RI_MOUSE_BUTTON_4_UP | RI_MOUSE_BUTTON_5_UP;
+            raw_release = (m.usButtonFlags & ups) != 0;
             if ((m.usFlags & MOUSE_MOVE_ABSOLUTE) == 0) {
                 InterlockedAdd64(&g_mouse_x, m.lLastX);
                 InterlockedAdd64(&g_mouse_y, m.lLastY);
@@ -610,27 +637,27 @@ bool on_message(void* hwnd, unsigned int msg, unsigned long long wparam, long lo
         }
     }
 
-    if (msg == WM_KEYDOWN && wparam == VK_F7 && (lparam & (1LL << 30)) == 0) {
-        InterlockedExchange(&g_keep_mouse_from_re4, g_keep_mouse_from_re4 ? 0 : 1);
-    }
-
-    // While Minecraft is in control, RE4 doesn't get the mouse: Minecraft does the looking and clicking
+    // While Minecraft is in control, RE4 doesn't get the mouse or Minecraft's movement keys: Minecraft does
+    // the moving, looking and clicking. Releases always go through, so RE4 never keeps a key or button
+    // "held" that was pressed during its own turn.
     bool menu_open = g_param != nullptr && g_param->functions->is_drawing_ui();
-    if (g_minecraft_active && g_keep_mouse_from_re4 && !menu_open) {
+    if (g_minecraft_active && g_input_to_re4 < 2 && !menu_open) {
+        bool keys_to_re4 = g_input_to_re4 == 1;
         switch (msg) {
-        case WM_INPUT: {
-            RAWINPUTHEADER header{};
-            UINT size = sizeof(header);
-            if (GetRawInputData((HRAWINPUT)lparam, RID_HEADER, &header, &size, sizeof(RAWINPUTHEADER)) != (UINT)-1 &&
-                header.dwType == RIM_TYPEMOUSE) {
+        case WM_INPUT:
+            if ((raw_mouse || (raw_minecraft_key && !keys_to_re4)) && !raw_release) {
                 return false;
             }
             break;
-        }
-        case WM_MOUSEMOVE: case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
-        case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_RBUTTONDBLCLK:
-        case WM_MBUTTONDOWN: case WM_MBUTTONUP: case WM_MOUSEWHEEL: case WM_MOUSEHWHEEL:
-        case WM_XBUTTONDOWN: case WM_XBUTTONUP:
+        case WM_KEYDOWN:
+            if (is_minecraft_key((UINT)wparam) && !keys_to_re4) {
+                return false;
+            }
+            break;
+        case WM_MOUSEMOVE: case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK:
+        case WM_RBUTTONDOWN: case WM_RBUTTONDBLCLK:
+        case WM_MBUTTONDOWN: case WM_MOUSEWHEEL: case WM_MOUSEHWHEEL:
+        case WM_XBUTTONDOWN:
             return false;
         default:
             break;
@@ -648,7 +675,7 @@ void write_mouse() {
             (unsigned long long)g_present_count, (long long)g_mouse_x, (long long)g_mouse_y,
             (long long)g_left_presses, (long long)g_right_presses,
             g_left_down ? "true" : "false", g_right_down ? "true" : "false",
-            (g_minecraft_active && g_keep_mouse_from_re4) ? "true" : "false");
+            g_minecraft_active ? "true" : "false");
     fclose(f);
     MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
 }

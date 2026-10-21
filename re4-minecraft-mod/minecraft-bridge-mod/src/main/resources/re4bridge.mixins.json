@@ -5,6 +5,7 @@
   "client": [
     "CameraMixin",
     "GameRendererMixin",
+    "HumanoidModelMixin",
     "KeyboardInputMixin",
     "LevelRendererMixin",
     "MinecraftMixin"
@@ -13,6 +14,9 @@
     "defaultRequire": 1
   },
   "mixins": [
-    "EntityMixin"
+    "EntityMixin",
+    "LivingEntityMixin",
+    "GroundPathNavigationMixin",
+    "MobMixin"
   ]
 }

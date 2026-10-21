@@ -14,12 +14,22 @@ local settings = {
     survival_bars_in_creative = false,
     held_item = true,
     send_input = true,
-    hide_all_re4_ui = true,     -- while Leon is in the game; F8 shows RE4's UI again
+    mob_brightness = 0.7,       -- Minecraft's mobs and character drawn over RE4 (RE4 is darker than Minecraft)
+    smart_hide_re4_ui = true,   -- hide RE4's always-on HUD, keep its prompts ("Climb", "Open", QTE buttons)
+    hide_all_re4_ui = false,    -- hide everything of RE4's UI while Minecraft has Leon; F8 shows it again
     hide_re4_ui = true,         -- picked elements (used when hide_all_re4_ui is off)
     show_debug = false,
 }
 
 local BRIDGE_FILE = "minecraft_bridge.json"   -- relative to reframework\data
+
+-- Who has Leon (minecraft_control.lua): "minecraft", "re4_moves" (ladder, door...) or "re4" (cutscene, menu, F7)
+local function control_mode()
+    local c = MinecraftRE4Control
+    if type(c) ~= "table" then return "minecraft" end
+    return c.mode
+end
+local function re4_turn() return control_mode() == "re4" end
 local READ_EVERY_FRAMES = 2
 local DISCONNECT_FRAMES = 120                  -- no new data for ~2 s = disconnected
 
@@ -711,7 +721,7 @@ end
 ------------------------------------------------------------------------------
 
 local INPUT_FILE = "minecraft_bridge_input.json"   -- relative to reframework\data
-local input = { seq = 0, swings = 0, uses = 0, perspective = 0, keys = {} }
+local input = { seq = 0, swings = 0, uses = 0, perspective = 0, keys = {}, brightness = settings.mob_brightness }
 local HEARTBEAT_FRAMES = 10   -- Minecraft gives control back to its keyboard if RE4 goes quiet
 
 local MOVE_KEYS = {
@@ -782,6 +792,7 @@ end
 
 -- New presses since the last call (nil when the plugin isn't running)
 local function plugin_new_presses(button)
+    if plugin_mouse == nil then return 0 end
     local total = plugin_mouse[button .. "_presses"] or 0
     local last = last_presses[button]
     last_presses[button] = total
@@ -817,16 +828,36 @@ end
 local function update_input()
     local changed = frame % HEARTBEAT_FRAMES == 0
 
-    -- With the REFramework menu open, release all keys so Minecraft's player stops
-    local menu = menu_open()
+    -- With the REFramework menu open, or during RE4's turn (cutscene, menu, F7), release all keys so
+    -- Minecraft's player stops, and tell Minecraft to hide its picture and leave the mouse to RE4
+    local turn = re4_turn()
+    if input.re4_turn ~= turn then
+        input.re4_turn = turn
+        changed = true
+    end
+    -- RE4 moves Leon (ladder, boat...): RE4 gets the movement keys, Minecraft's player stands still
+    local re4_moves = control_mode() ~= "minecraft"
+    if input.re4_keys ~= re4_moves then
+        input.re4_keys = re4_moves
+        changed = true
+    end
+    local menu = menu_open() or turn
     for name, keys in pairs(MOVE_KEYS) do
-        local down = not menu and any_key_down(keys)
+        local down = not menu and not re4_moves and any_key_down(keys)
         if input.keys[name] ~= down then
             input.keys[name] = down
             changed = true
         end
     end
     if menu then
+        -- Clicks made meanwhile were for RE4, not Minecraft
+        read_plugin_mouse()
+        plugin_new_presses("left")
+        plugin_new_presses("right")
+        if input.keys.attack or input.keys.use then
+            input.keys.attack, input.keys.use = false, false
+            changed = true
+        end
         if changed then send_input() end
         return
     end
@@ -875,6 +906,11 @@ local function update_input()
     end
     mouse_was_down = mouse
 
+    -- Held right button: bows and crossbows draw, food is eaten, shields block
+    if input.keys.use ~= right then
+        input.keys.use = right
+        changed = true
+    end
     if new_right > 0 then
         input.uses = input.uses + new_right
         swing_frame = frame
@@ -951,12 +987,47 @@ local function update_ui_toggle()
 end
 
 -- Called by REFramework for every RE4 UI element before it is drawn; false = don't draw it
+-- Smart hiding: RE4's HUD (health, ammo...) is drawn all the time, its prompts ("Climb", "Open", QTE
+-- buttons, item pickups) only now and then. Anything drawn without a break for HUD_SECONDS is learned as
+-- HUD and hidden from then on (remembered in minecraft_learned_hud.json); everything else is shown.
+local LEARNED_HUD_FILE = "minecraft_learned_hud.json"
+local HUD_FRAMES = 45 * 60   -- prompts (a door, the merchant) rarely stay this long
+local learned_hud = {}
+local gui_streak = {}   -- element name -> frame its current unbroken run of drawing started
+
+do
+    local ok, saved = pcall(json.load_file, LEARNED_HUD_FILE)
+    if ok and type(saved) == "table" then
+        for _, name in ipairs(saved) do learned_hud[name] = true end
+    end
+end
+
+local function learn_hud(name)
+    learned_hud[name] = true
+    local list = {}
+    for n in pairs(learned_hud) do table.insert(list, n) end
+    table.sort(list)
+    pcall(json.dump_file, LEARNED_HUD_FILE, list)
+end
+
 re.on_pre_gui_draw_element(function(element, context)
     local ok, name = pcall(function() return element:call("get_GameObject"):call("get_Name") end)
     if not ok or name == nil then return true end
+    local last = gui_seen[name]
+    if last == nil or frame - last > 10 then gui_streak[name] = frame end
     gui_seen[name] = frame
-    if show_re4_ui then return true end
-    if settings.hide_all_re4_ui then return not leon_present end
+    -- RE4's turn and RE4's own actions (cutscenes, QTEs, ladders): RE4 needs its UI. Only time spent while
+    -- Minecraft plays counts toward learning the HUD.
+    if control_mode() ~= "minecraft" or not leon_present then gui_streak[name] = frame end
+    if show_re4_ui or not leon_present then return true end
+    if control_mode() ~= "minecraft" then return true end
+
+    if settings.smart_hide_re4_ui and leon_present and not learned_hud[name]
+        and frame - (gui_streak[name] or frame) >= HUD_FRAMES then
+        learn_hud(name)
+    end
+    if settings.hide_all_re4_ui then return false end
+    if settings.smart_hide_re4_ui and learned_hud[name] then return false end
     if settings.hide_re4_ui and hidden_gui[name] then return false end
     return true
 end)
@@ -1048,7 +1119,7 @@ re.on_frame(function()
     if settings.send_input then
         update_input()
     end
-    if minecraft_draws_ui() then return end
+    if re4_turn() or minecraft_draws_ui() then return end
 
     -- Show the slot picked in RE4 right away, before Minecraft confirms it
     local selected = data.selected
@@ -1085,6 +1156,18 @@ re.on_draw_ui(function()
         changed, settings.survival_bars_in_creative = imgui.checkbox("Show hearts/hunger/XP in Creative", settings.survival_bars_in_creative)
         changed, settings.held_item = imgui.checkbox("Show held item", settings.held_item)
         changed, settings.send_input = imgui.checkbox("Send keys, mouse and look direction to Minecraft", settings.send_input)
+        changed, settings.mob_brightness = imgui.slider_float("Brightness of Minecraft mobs/character", settings.mob_brightness, 0.2, 1.0)
+        if changed then input.brightness = settings.mob_brightness end
+        changed, settings.smart_hide_re4_ui = imgui.checkbox("Hide RE4's HUD, keep its prompts (F8 = show all)", settings.smart_hide_re4_ui)
+        if settings.smart_hide_re4_ui then
+            local n = 0
+            for _ in pairs(learned_hud) do n = n + 1 end
+            imgui.same_line()
+            if imgui.button("Forget learned HUD (" .. n .. ")") then
+                learned_hud = {}
+                pcall(json.dump_file, LEARNED_HUD_FILE, {})
+            end
+        end
         changed, settings.hide_all_re4_ui = imgui.checkbox("Hide all RE4 UI while playing (F8 = show it)", settings.hide_all_re4_ui)
         if not settings.hide_all_re4_ui then
             changed, settings.hide_re4_ui = imgui.checkbox("Hide picked RE4 UI elements", settings.hide_re4_ui)

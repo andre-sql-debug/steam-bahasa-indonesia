@@ -3,25 +3,31 @@ package dev.re4bridge;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.mojang.blaze3d.platform.InputConstants;
 import com.mojang.blaze3d.platform.NativeImage;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.CameraType;
 import net.minecraft.client.GraphicsStatus;
+import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.packs.resources.Resource;
+import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.ai.attributes.Attributes;
+import net.minecraft.world.entity.projectile.AbstractArrow;
 import net.minecraft.world.item.CrossbowItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.EntityHitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.HitResult;
 import org.lwjgl.glfw.GLFW;
@@ -86,6 +92,13 @@ public class Re4Bridge implements ClientModInitializer {
     private static int lastInputUses = -1;
     private static int lastInputPerspective = -1;
 
+    // Brightness of Minecraft's mobs and character in RE4 (RE4's scenes are darker than Minecraft's sky)
+    private static volatile float characterBrightness = 0.7F;
+
+    public static float characterBrightness() {
+        return characterBrightness;
+    }
+
     // Written by the renderer mixins, sent to RE4 so its camera matches Minecraft's
     public static volatile double worldFov = 70.0;
     public static volatile float cameraDistance = 4.0F;
@@ -117,6 +130,18 @@ public class Re4Bridge implements ClientModInitializer {
     private static Path pluginStatusFile;
     private static Path terrainFile;
     private static long lastTerrainSeq = -1;
+    // RE4's turn (cutscene, grab, menu, F7): Minecraft's picture is hidden and RE4 gets the mouse
+    private static volatile boolean re4Turn = false;
+    // RE4 moves Leon (ladder, boat): RE4 gets the movement keys, Minecraft keeps the mouse and picture
+    private static volatile boolean re4Keys = false;
+    private static boolean useHeldByRe4 = false;
+    // Position syncs: RE4 asked to move the player to where Leon ended up after one of RE4's actions
+    private static long syncDone = 0;
+    // Arrows the player shot (bows, crossbows, tridents), for RE4 to apply the damage
+    private static int shotSeq = 0;
+    private static int lastShotDamage = 0;
+    private static boolean lastShotCrit = false;
+    private static final java.util.LinkedHashSet<Integer> seenArrows = new java.util.LinkedHashSet<>();
     // Minecraft's player is moved this high when anchored, above anything in its own world
     private static final double ANCHOR_Y = 250.0;
 
@@ -132,7 +157,7 @@ public class Re4Bridge implements ClientModInitializer {
 
     /** Movement keys held in RE4. */
     public static class RemoteKeys {
-        public boolean forward, back, left, right, jump, sneak, sprint, attack;
+        public boolean forward, back, left, right, jump, sneak, sprint, attack, use;
     }
 
     @Override
@@ -150,6 +175,7 @@ public class Re4Bridge implements ClientModInitializer {
             LOGGER.warn("RE4 Bridge: could not create {}", outputFile.getParent(), e);
         }
         OverlayStreamer.open(outputFile.resolveSibling("minecraft_overlay.bin"));
+        Re4Puppet.init(outputFile.resolveSibling("minecraft_puppet.json"));
         LOGGER.info("RE4 Bridge: writing HUD data to {}, reading input from {}", outputFile, inputFile);
     }
 
@@ -159,7 +185,7 @@ public class Re4Bridge implements ClientModInitializer {
 
     /** End of a rendered frame: send the picture to RE4 while in overlay mode. */
     public static void onFrameRendered(Minecraft mc) {
-        if (overlayActive && mc.level != null) {
+        if (overlayActive && (!re4Turn || Re4Puppet.active()) && mc.level != null) {
             try {
                 OverlayStreamer.capture(mc);
             } catch (Exception e) {
@@ -168,19 +194,52 @@ public class Re4Bridge implements ClientModInitializer {
         }
     }
 
-    // Overlay mode on/off follows whether RE4 is in control
+    // Overlay mode on/off follows whether RE4 is in control; during RE4's turn the picture is hidden
     private static void updateOverlayMode(Minecraft mc) {
         boolean want = remoteKeys() != null && mc.player != null;
-        if (want == overlayActive) {
+        if (want != overlayActive) {
+            overlayActive = want;
+            if (want) {
+                enterOverlayMode(mc);
+            } else {
+                exitOverlayMode(mc);
+            }
+        }
+        OverlayStreamer.setActive(overlayActive && (!re4Turn || Re4Puppet.active()));
+        OverlayStreamer.setInputToRe4(re4Turn ? 2 : (re4Keys ? 1 : 0));
+    }
+
+    // The right mouse button held in RE4 = Minecraft's "use" key held (drawing bows, eating, blocking)
+    private static void holdUseKey(Minecraft mc) {
+        RemoteKeys remote = remoteKeys();
+        boolean down = remote != null && remote.use && !re4Turn;
+        if (remote != null || useHeldByRe4) {
+            mc.options.keyUse.setDown(down);
+            useHeldByRe4 = down;
+        }
+    }
+
+    // New arrows from the player: Minecraft's arrow damage (speed x base damage, crits), applied in RE4
+    private static void detectShots(Minecraft mc) {
+        LocalPlayer player = mc.player;
+        if (player == null || mc.level == null) {
             return;
         }
-        overlayActive = want;
-        if (want) {
-            enterOverlayMode(mc);
-        } else {
-            exitOverlayMode(mc);
+        for (Entity entity : mc.level.entitiesForRendering()) {
+            if (entity instanceof AbstractArrow arrow && arrow.tickCount <= 3 && arrow.getOwner() == player
+                    && seenArrows.add(arrow.getId())) {
+                int damage = Mth.ceil(Mth.clamp(arrow.getDeltaMovement().length() * arrow.getBaseDamage(), 0.0, 1000.0));
+                if (arrow.isCritArrow()) {
+                    damage += damage / 4 + 1;   // vanilla adds a random 0..damage/2+1
+                }
+                lastShotDamage = damage;
+                lastShotCrit = arrow.isCritArrow();
+                shotSeq++;
+                if (seenArrows.size() > 64) {
+                    seenArrows.remove(seenArrows.iterator().next());
+                }
+            }
         }
-        OverlayStreamer.setActive(want);
     }
 
     private static void enterOverlayMode(Minecraft mc) {
@@ -278,6 +337,7 @@ public class Re4Bridge implements ClientModInitializer {
                 applySync(mc);
             }
             continueDestroying(mc);
+            holdUseKey(mc);
             updateOverlayMode(mc);
         } catch (Exception e) {
             warnOnce("could not apply RE4 input", e);
@@ -299,7 +359,9 @@ public class Re4Bridge implements ClientModInitializer {
             }
             if (mc.player != null) {
                 updateTextures(mc);
+                detectShots(mc);
             }
+            Re4Puppet.tick(mc);
             write(outputFile, buildState(mc).toString());
         } catch (Exception e) {
             warnOnce("could not write " + outputFile, e);
@@ -363,7 +425,16 @@ public class Re4Bridge implements ClientModInitializer {
                 next.sneak = flag(k, "sneak");
                 next.sprint = flag(k, "sprint");
                 next.attack = flag(k, "attack");
+                next.use = flag(k, "use");
                 keys = next;
+            }
+            re4Turn = input.has("re4_turn") && input.get("re4_turn").getAsBoolean();
+            re4Keys = input.has("re4_keys") && input.get("re4_keys").getAsBoolean();
+            if (input.has("brightness")) {
+                float b = input.get("brightness").getAsFloat();
+                if (Float.isFinite(b)) {
+                    characterBrightness = Math.max(0.1F, Math.min(1.0F, b));
+                }
             }
             remoteYaw = input.has("yaw") ? finiteOrNull(input.get("yaw").getAsFloat()) : null;
             remotePitch = input.has("pitch") ? finiteOrNull(input.get("pitch").getAsFloat()) : null;
@@ -391,7 +462,8 @@ public class Re4Bridge implements ClientModInitializer {
             if (input.has("uses")) {
                 int uses = input.get("uses").getAsInt();
                 if (uses > lastInputUses && !firstRead) {
-                    rightClick(mc, player);
+                    // A real "use" click: Minecraft places, eats, draws a bow... and repeats while held
+                    KeyMapping.click(InputConstants.getKey(mc.options.keyUse.saveString()));
                 }
                 lastInputUses = uses;
             }
@@ -409,7 +481,8 @@ public class Re4Bridge implements ClientModInitializer {
             return;
         }
         // Look where Leon looks, so Minecraft aims its placing and breaking at the same spot
-        if (remoteYaw != null && remotePitch != null) {
+        // (not in a cutscene: then your character faces where Leon faces)
+        if (remoteYaw != null && remotePitch != null && !Re4Puppet.active()) {
             player.setYRot(remoteYaw);
             player.setXRot(remotePitch);
             player.yRotO = remoteYaw;
@@ -419,6 +492,28 @@ public class Re4Bridge implements ClientModInitializer {
         // Sprinting is started by the sprint key in LocalPlayer.aiStep, which reads the real keyboard
         if (remote.sprint && remote.forward && !remote.sneak) {
             player.setSprinting(true);
+        }
+    }
+
+    public static void teleportPlayer(Minecraft mc, LocalPlayer player, double x, double y, double z) {
+        teleport(mc, player, x, y, z);
+    }
+
+    // Moves the player on the client and on the integrated server, without falling damage
+    private static void teleport(Minecraft mc, LocalPlayer player, double x, double y, double z) {
+        player.setPos(x, y, z);
+        player.setDeltaMovement(Vec3.ZERO);
+        player.resetFallDistance();
+        var server = mc.getSingleplayerServer();
+        if (server != null) {
+            var uuid = player.getUUID();
+            server.execute(() -> {
+                ServerPlayer serverPlayer = server.getPlayerList().getPlayer(uuid);
+                if (serverPlayer != null) {
+                    serverPlayer.teleportTo(x, y, z);
+                    serverPlayer.resetFallDistance();
+                }
+            });
         }
     }
 
@@ -435,6 +530,25 @@ public class Re4Bridge implements ClientModInitializer {
             if (control && request != 0 && request != Re4Terrain.anchorEpoch()) {
                 anchorAt(mc, player, request);
             }
+            // After one of RE4's own actions (ladder, door, cutscene) RE4 asks to move the player to Leon
+            long epoch = terrain.has("epoch") ? terrain.get("epoch").getAsLong() : 0;
+            if (control && terrain.has("sync") && epoch != 0 && epoch == Re4Terrain.anchorEpoch()) {
+                JsonObject sync = terrain.getAsJsonObject("sync");
+                long syncSeq = sync.get("seq").getAsLong();
+                if (syncSeq != syncDone) {
+                    double x = sync.get("x").getAsDouble(), y = sync.get("y").getAsDouble(), z = sync.get("z").getAsDouble();
+                    if (Double.isFinite(x) && Double.isFinite(y) && Double.isFinite(z)) {
+                        teleport(mc, player, x, y, z);
+                    }
+                    syncDone = syncSeq;
+                }
+            }
+            // RE4's enemies near Leon, for their Minecraft stand-ins
+            if (control && epoch != 0 && epoch == Re4Terrain.anchorEpoch() && terrain.has("enemies")) {
+                Re4Enemies.setTargets(terrain.get("enemies").getAsString());
+            } else {
+                Re4Enemies.clearTargets();
+            }
             long seq = terrain.has("seq") ? terrain.get("seq").getAsLong() : -1;
             if (seq != lastTerrainSeq) {
                 lastTerrainSeq = seq;
@@ -445,26 +559,23 @@ public class Re4Bridge implements ClientModInitializer {
                 }
             }
         }
+        if (terrain == null) {
+            Re4Enemies.clearTargets();
+        }
         Re4Terrain.setEnforced(control);
+
+        // The stand-ins live on the integrated server
+        var server = mc.getSingleplayerServer();
+        if (server != null) {
+            var uuid = player.getUUID();
+            server.execute(() -> Re4Enemies.update(server, uuid));
+        }
     }
 
     private static void anchorAt(Minecraft mc, LocalPlayer player, long epoch) {
         double x = player.getX();
         double z = player.getZ();
-        player.setPos(x, ANCHOR_Y, z);
-        player.setDeltaMovement(Vec3.ZERO);
-        player.resetFallDistance();
-        var server = mc.getSingleplayerServer();
-        if (server != null) {
-            var uuid = player.getUUID();
-            server.execute(() -> {
-                ServerPlayer serverPlayer = server.getPlayerList().getPlayer(uuid);
-                if (serverPlayer != null) {
-                    serverPlayer.teleportTo(x, ANCHOR_Y, z);
-                    serverPlayer.resetFallDistance();
-                }
-            });
-        }
+        teleport(mc, player, x, ANCHOR_Y, z);
         Re4Terrain.setAnchor(epoch, x, ANCHOR_Y, z);
         lastTerrainSeq = -1;
         LOGGER.info("RE4 Bridge: anchored epoch {} at {} {} {}", epoch, x, ANCHOR_Y, z);
@@ -498,9 +609,11 @@ public class Re4Bridge implements ClientModInitializer {
         }
     }
 
+    // A real block the player looks at (not RE4's ground, which is only a place to put blocks on)
     private static BlockHitResult lookedAtBlock(LocalPlayer player) {
         HitResult hit = player.pick(player.blockInteractionRange(), 1.0F, false);
-        if (hit instanceof BlockHitResult blockHit && hit.getType() == HitResult.Type.BLOCK) {
+        if (hit instanceof BlockHitResult blockHit && hit.getType() == HitResult.Type.BLOCK
+                && !player.level().getBlockState(blockHit.getBlockPos()).isAir()) {
             return blockHit;
         }
         return null;
@@ -508,6 +621,12 @@ public class Re4Bridge implements ClientModInitializer {
 
     // Left click: break the looked-at block like Minecraft does, otherwise attack (RE4 applies the damage)
     private static void leftClick(Minecraft mc, LocalPlayer player) {
+        // A Minecraft mob, or the stand-in of an RE4 enemy, in the crosshair: Minecraft's own attack
+        if (mc.hitResult instanceof EntityHitResult hit && mc.gameMode != null) {
+            mc.gameMode.attack(player, hit.getEntity());
+            player.swing(InteractionHand.MAIN_HAND);
+            return;
+        }
         BlockHitResult block = lookedAtBlock(player);
         if (block != null && mc.gameMode != null) {
             mc.gameMode.startDestroyBlock(block.getBlockPos(), block.getDirection());
@@ -537,25 +656,6 @@ public class Re4Bridge implements ClientModInitializer {
     }
 
     // Right click: Minecraft's own "use" (places the held block, opens doors, eats food...)
-    private static void rightClick(Minecraft mc, LocalPlayer player) {
-        if (mc.gameMode == null) {
-            return;
-        }
-        BlockHitResult block = lookedAtBlock(player);
-        if (block != null) {
-            InteractionResult result = mc.gameMode.useItemOn(player, InteractionHand.MAIN_HAND, block);
-            if (result.consumesAction()) {
-                if (result.shouldSwing()) {
-                    player.swing(InteractionHand.MAIN_HAND);
-                }
-                return;
-            }
-        }
-        InteractionResult result = mc.gameMode.useItem(player, InteractionHand.MAIN_HAND);
-        if (result.consumesAction() && result.shouldSwing()) {
-            player.swing(InteractionHand.MAIN_HAND);
-        }
-    }
 
     // Minecraft's attack math: cooldown, attack damage attribute, critical hits. RE4 applies the result.
     private static void attack(LocalPlayer player) {
@@ -668,6 +768,20 @@ public class Re4Bridge implements ClientModInitializer {
                 && Math.abs(player.getY() - a[1]) < 64.0;
         state.addProperty("terrain_boxes", Re4Terrain.boxCount());
         state.addProperty("authority", Re4Terrain.enforced() && covered);
+        state.addProperty("sync_done", syncDone);
+
+        // Damage Minecraft did to RE4's enemies through their stand-ins (totals per enemy)
+        JsonObject enemyDamage = new JsonObject();
+        for (Map.Entry<String, Float> entry : Re4Enemies.damageTotals().entrySet()) {
+            enemyDamage.addProperty(entry.getKey(), entry.getValue());
+        }
+        state.add("enemy_damage", enemyDamage);
+
+        JsonObject shot = new JsonObject();
+        shot.addProperty("seq", shotSeq);
+        shot.addProperty("damage", lastShotDamage);
+        shot.addProperty("crit", lastShotCrit);
+        state.add("shot", shot);
 
         JsonObject attack = new JsonObject();
         attack.addProperty("seq", attackSeq);
