@@ -37,8 +37,10 @@ local state = {
     acked = {},           -- export ids with a working object
 }
 local debug = { status = "off", errors = {}, loaded = 0, failed = 0, shown = 0, pooled = 0 }
--- For the diagnostics report (minecraft_diagnostics.lua): how loading and placing the parts went
-MinecraftRE4Native = { debug = debug, settings = settings, state = state }
+-- For the diagnostics report (minecraft_diagnostics.lua): how loading and placing the parts went. blocks_shown:
+-- the built blocks shown as RE4 objects right now (their numbers, as text), so minecraft_blocks.lua doesn't draw
+-- its flat cubes over them
+MinecraftRE4Native = { debug = debug, settings = settings, state = state, blocks_shown = {} }
 
 local function note_error(text)
     if #debug.errors < 12 then debug.errors[#debug.errors + 1] = text end
@@ -110,7 +112,7 @@ local function new_object(id, asset)
     if create_method == nil or mesh_type == nil then return nil, "via.GameObject.create or via.render.Mesh missing" end
     name_counter = name_counter + 1
     local name = string.format("MinecraftPart_%s_%d", tostring(id), name_counter)
-    made_names[#made_names + 1] = name
+    made_names[name] = true
     local okc, go = pcall(function() return create_method:call(nil, name) end)
     if not okc or go == nil then return nil, "create failed: " .. tostring(go) end
     pcall(function() go = go:add_ref() end)
@@ -128,7 +130,7 @@ local function new_object(id, asset)
     pcall(function() mesh:call("set_DrawShadowCast", true) end)
     local tr = try_call(go, "get_Transform")
     if tr == nil then return nil, "no transform" end
-    return { go = go, tr = tr, mesh = mesh, export = id, shown = true }
+    return { go = go, tr = tr, mesh = mesh, export = id, shown = true, name = name }
 end
 
 local function show(o, on)
@@ -171,13 +173,43 @@ destroy_all = function(touch)
         state.pool[id] = nil
     end
     debug.pooled = 0
+    MinecraftRE4Native.blocks_shown = {}
     if touch then made_names = {} end
+end
+
+local POOL_KEEP_FRAMES = 600     -- a hidden object not reused for this long is destroyed
+local POOL_TRIM_PER_FRAME = 16
+
+-- Hidden and kept for reuse by its own export (newest last, so the oldest are first)
+local function pool_object(o)
+    show(o, false)
+    o.pooled_at = state.frame
+    state.pool[o.export] = state.pool[o.export] or {}
+    table.insert(state.pool[o.export], o)
+    debug.pooled = debug.pooled + 1
+end
+
+-- Blocks make a pool per kind (and per crop age, door state...), so hidden objects not reused for a while are
+-- destroyed, a few per frame (ours, made in this area: the same case as destroy_all(true))
+local function trim_pool()
+    local left = POOL_TRIM_PER_FRAME
+    for id, list in pairs(state.pool) do
+        while left > 0 and #list > 0 and state.frame - list[1].pooled_at > POOL_KEEP_FRAMES do
+            local o = table.remove(list, 1)
+            pcall(function() o.go:call("destroy(via.GameObject)", o.go) end)
+            made_names[o.name] = nil
+            debug.pooled = debug.pooled - 1
+            left = left - 1
+        end
+        if #list == 0 then state.pool[id] = nil end
+        if left == 0 then return end
+    end
 end
 
 -- After a loading screen: objects of ours that RE4 kept (forgotten while it loaded) are looked up by name in the
 -- current scene and removed, so no frozen copy of a mob stays behind
 local function remove_survivors()
-    if #made_names == 0 then return end
+    if next(made_names) == nil then return end
     local names = made_names
     made_names = {}
     local ok, scene = pcall(function()
@@ -186,7 +218,7 @@ local function remove_survivors()
     end)
     if not ok or scene == nil then return end
     local removed = 0
-    for _, name in ipairs(names) do
+    for name in pairs(names) do
         local okf, go = pcall(function() return scene:call("findGameObject(System.String)", name) end)
         if okf and go ~= nil and pcall(function() go:call("destroy(via.GameObject)", go) end) then removed = removed + 1 end
     end
@@ -254,19 +286,16 @@ local function apply_poses(parts)
         if o == nil or o.pose ~= pose then v = pose_numbers(pose) end
         if v ~= nil or o ~= nil and o.pose == pose then
             present[key] = true
-            entries[#entries + 1] = { key = key, id = id, pose = pose, v = v }
+            entries[#entries + 1] = { key = key, mob = mob, id = id, pose = pose, v = v }
         end
     end
     for key, o in pairs(state.objects) do
         if not present[key] then
-            show(o, false)
             state.objects[key] = nil
-            state.pool[o.export] = state.pool[o.export] or {}
-            table.insert(state.pool[o.export], o)
-            debug.pooled = debug.pooled + 1
+            pool_object(o)
         end
     end
-    local shown = 0
+    local shown, blocks_shown = 0, {}
     for _, e in ipairs(entries) do
         local o = state.objects[e.key]
         if o == nil and state.assets[e.id] ~= nil and state.assets[e.id].mesh ~= nil then
@@ -277,6 +306,7 @@ local function apply_poses(parts)
             if place(o, e.pose, e.v) then
                 show(o, true)
                 shown = shown + 1
+                if e.mob:sub(1, 1) == "-" then blocks_shown[e.mob] = true end
             else
                 note_error("could not move part " .. e.id)
                 state.objects[e.key] = nil
@@ -285,18 +315,17 @@ local function apply_poses(parts)
         end
     end
     debug.shown = shown
+    MinecraftRE4Native.blocks_shown = blocks_shown
 end
 
 -- Minecraft stopped sending (closed, frozen, Real mobs off there): hide everything
 local function hide_all()
     for key, o in pairs(state.objects) do
-        show(o, false)
         state.objects[key] = nil
-        state.pool[o.export] = state.pool[o.export] or {}
-        table.insert(state.pool[o.export], o)
-        debug.pooled = debug.pooled + 1
+        pool_object(o)
     end
     debug.shown = 0
+    MinecraftRE4Native.blocks_shown = {}
 end
 
 local function read_poses()
@@ -344,9 +373,11 @@ re.on_application_entry("LateUpdateBehavior", function()
         if state.frame % ASSETS_EVERY_FRAMES == 0 then pcall(load_assets) end
         local ok, err = pcall(read_poses)
         if not ok then note_error("poses: " .. tostring(err)) end
+        pcall(trim_pool)
         debug.status = "on"
     else
         if next(state.objects) ~= nil or next(state.pool) ~= nil then destroy_all(true) end
+        MinecraftRE4Native.blocks_shown = {}
         state.acked = {}
         debug.status = "off"
     end

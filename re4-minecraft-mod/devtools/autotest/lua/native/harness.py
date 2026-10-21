@@ -21,6 +21,8 @@ local ctx = obj({})
 local cm = obj({ getPlayerContextRef = function() if LEON then return ctx end return nil end })
 RESOURCES_OK = { ["minecraft/m_a.mesh"] = true, ["minecraft/t_a.mdf2"] = true, ["minecraft/m_b.mesh"] = true }
 CREATED, DESTROYED = 0, 0
+DESTROYED_NAMES = {}
+FINDS = {}   -- names looked up in the scene after a loading screen
 SETS = 0   -- calls that move an object (set_Position / set_Rotation / set_LocalScale)
 OBJECTS = {}
 local function make_go(name)
@@ -37,14 +39,17 @@ local function make_go(name)
             go.mesh = mesh
             return mesh
         end,
-        ["destroy(via.GameObject)"] = function(g) DESTROYED = DESTROYED + 1; g.destroyed = true end })
+        ["destroy(via.GameObject)"] = function(g) DESTROYED = DESTROYED + 1; g.destroyed = true; DESTROYED_NAMES[g.name] = true end })
     go.tr = tr
     CREATED = CREATED + 1
     OBJECTS[#OBJECTS + 1] = go
     return go
 end
 local create = { call = function(self, _, name) return make_go(name) end }
+-- the current scene: nothing of ours is found there (RE4 removed it while loading)
+local scene = obj({ ["findGameObject(System.String)"] = function(name) FINDS[#FINDS + 1] = name; return nil end })
 sdk = { get_managed_singleton = function() return cm end, game_namespace = function(n) return "chainsaw." .. n end,
+    get_native_singleton = function() return {} end, call_native_func = function() return scene end,
     find_type_definition = function(n) if n == "via.GameObject" then return { get_method = function() return create end } end end,
     typeof = function(n) return n end,
     create_resource = function(t, path)
@@ -193,9 +198,57 @@ errors = list(G.MinecraftRE4Native.debug.errors.values())
 check("non-number pose: part hidden, nothing moved", b3.go.draw is False and G.SETS == 0 and abs(b3.tr.pos.y - 5.0) < 1e-6
       and G.MinecraftRE4Native.debug.shown == 52, (b3.go.draw, G.SETS, b3.tr.pos.y, G.MinecraftRE4Native.debug.shown))
 check("non-number pose: no error", not any("could not move" in str(e) for e in errors), errors)
+def blocks_shown():
+    t = G.MinecraftRE4Native.blocks_shown
+    return dict(t.items()) if t is not None else None
+shown_blocks = blocks_shown() or {}
+check("hidden block not in blocks_shown (minecraft_blocks.lua draws its stand-in)",
+      "-12289" not in shown_blocks and shown_blocks.get("-1") is True, blocks_shown() is not None)
 before = G.CREATED
 FILES["minecraft_native_poses.json"] = json.dumps({"seq": 25, "session": 43, "parts": blocks})
 frames(3)
 check("back to numbers: shown again (kept object reused, no new one)", b3.go.draw is True and G.CREATED == before
       and G.MinecraftRE4Native.debug.shown == 53, (b3.go.draw, G.CREATED - before, G.MinecraftRE4Native.debug.shown))
+# The blocks shown (for minecraft_blocks.lua): exactly the negative numbers, as Minecraft wrote them
+shown_blocks = blocks_shown() or {}
+check("blocks_shown: the 52 blocks by their numbers, not the mob", len(shown_blocks) == 52 and shown_blocks.get("-12289") is True
+      and shown_blocks.get("-9223372036854775808") is True and shown_blocks.get("-5") is True and "5" not in shown_blocks,
+      (len(shown_blocks), sorted(shown_blocks)[:5]))
+
+# Hidden objects kept for reuse are destroyed after a while (a few per frame), and then not looked up again after a
+# loading screen: blocks make a pool per kind, which would otherwise only grow until the next loading screen
+seq = [100]
+def pose_frames(n, parts):
+    for _ in range(n):
+        seq[0] += 1
+        FILES["minecraft_native_poses.json"] = json.dumps({"seq": seq[0], "session": 43, "parts": parts})
+        frames(1)
+only_mob = "5,1,62.0,5.0,7.0,0,0,0,1,1,1,1;"
+pose_frames(1, only_mob)
+check("blocks no longer sent: 52 objects kept for reuse", G.MinecraftRE4Native.debug.pooled == 52
+      and blocks_shown() == {}, (G.MinecraftRE4Native.debug.pooled, blocks_shown()))
+destroyed = G.DESTROYED
+pose_frames(590, only_mob)
+check("kept objects not destroyed before the time is up", G.DESTROYED == destroyed and G.MinecraftRE4Native.debug.pooled == 52,
+      (G.DESTROYED - destroyed, G.MinecraftRE4Native.debug.pooled))
+per_frame = []
+for _ in range(30):
+    d = G.DESTROYED
+    pose_frames(1, only_mob)
+    per_frame.append(G.DESTROYED - d)
+check("kept objects destroyed after the time is up, at most 16 per frame", sum(per_frame) == 52 and max(per_frame) == 16
+      and G.MinecraftRE4Native.debug.pooled == 0 and G.MinecraftRE4Native.state.pool[1] is None
+      and G.MinecraftRE4Native.state.pool["1"] is None, (per_frame, G.MinecraftRE4Native.debug.pooled))
+mob = objects["5:1:1"]
+check("the shown mob part is untouched", mob is not None and mob.go.draw is True and not mob.go.destroyed)
+mob_name = mob and mob.name
+L.execute("FINDS = {}")
+G.LEON = False
+frames(5)
+G.LEON = True
+FILES["minecraft_native_poses.json"] = json.dumps({"seq": 900, "session": 43, "parts": only_mob})
+frames(2)
+finds = list(G.FINDS.values())
+check("after a loading screen only live objects are looked up, not destroyed ones", finds == [mob_name]
+      and not any(G.DESTROYED_NAMES[n] for n in finds), finds)
 print("FAILS", fails)

@@ -31,6 +31,8 @@ REPORT_DIR = os.path.join(HERE, ".report")
 LUA_SUITES = [
     ("lua: real RE4 mobs spawner", [os.path.join(HERE, "lua", "native", "harness.py"), os.path.join(REPO, "minecraft_native.lua")],
      r"FAILS (\d+)"),
+    ("lua: block stand-ins skip RE4's real blocks", [os.path.join(HERE, "lua", "blocks", "harness.py"),
+                                                      os.path.join(REPO, "minecraft_blocks.lua")], r"FAILS (\d+)"),
     ("lua: enemies look at mobs", [os.path.join(HERE, "lua", "attention", "harness.py"), os.path.join(REPO, "minecraft_gameplay.lua")],
      r"\d+ passed, (\d+) failed"),
     ("lua: one Minecraft menu, saved settings", [os.path.join(HERE, "lua", "menu", "harness.py"), REPO], r"FAILS (\d+)"),

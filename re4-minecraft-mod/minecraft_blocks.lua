@@ -181,14 +181,22 @@ local function draw_quad(s, color, edge)
     end
 end
 
+-- The number a built block goes by in minecraft_native.lua (the mod's Re4Native.blockId: -1 - BlockPos.asLong)
+local function native_block_id(x, y, z)
+    return string.format("%d", -1 - ((((x & 0x3FFFFFF) << 38) | ((z & 0x3FFFFFF) << 12) | (y & 0xFFF)) & math.maxinteger))
+end
+
 local function collect_faces(cam)
     local faces = {}
     local max_d2 = settings.max_distance * settings.max_distance
+    -- Blocks RE4 shows as real objects (minecraft_native.lua) need no flat cube over them
+    local native = type(MinecraftRE4Native) == "table" and MinecraftRE4Native.blocks_shown or nil
+    if native ~= nil and next(native) == nil then native = nil end
     for _, b in ipairs(blocks) do
         local bx, by, bz = b[1], b[2], b[3]
         local origin = to_re4(bx, by, bz)
         local cx, cy, cz = origin.x + 0.5 - cam.x, origin.y + 0.5 - cam.y, origin.z + 0.5 - cam.z
-        if cx * cx + cy * cy + cz * cz <= max_d2 then
+        if cx * cx + cy * cy + cz * cz <= max_d2 and (native == nil or not native[native_block_id(bx, by, bz)]) then
             local color = colors[b[4]] or { top = { 128, 128, 128 }, side = { 128, 128, 128 } }
             for _, face in ipairs(FACES) do
                 local n = face.n

@@ -61,8 +61,9 @@ hit, and anything RE4 can't show). Your own character in third person (F5) and i
 with your skin (its see-through outer layer cut out). The blocks you built do too: each kind of block is
 written once with its own few textures (cut from Minecraft's block textures, not the whole sheet), and RE4
 places one object per block, up to the 400 nearest; Minecraft keeps drawing only what RE4 doesn't show:
-blocks Minecraft colours by biome (grass, leaves, vines), see-through ones (stained glass, ice, slime) and
-blocks drawn by their own code (chests, banners). Pixel-art textures are scaled up sharply, and see-through
+blocks Minecraft colours by biome (grass, leaves, vines), see-through ones (stained glass, ice, slime),
+animated ones (fire, lanterns, campfires, magma, sea lanterns) and blocks drawn by their own code (chests,
+banners). Pixel-art textures are scaled up sharply, and see-through
 pixels are cut out. Needs REFramework's **Loose File Loader** (`install.bat` turns it on).
 
 **Hearts and death**: RE4's hits on Leon cost the Minecraft player hearts (Leon keeps full health in RE4),

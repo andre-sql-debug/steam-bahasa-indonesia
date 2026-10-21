@@ -73,6 +73,38 @@ def drawn_pixels(picture, box, min_alpha=30):
     return n
 
 
+def soft_pixels(picture, box):
+    """See-through pixels in the box (a shadow drawn on nothing, i.e. over RE4's picture), not opaque ones."""
+    data, w, h = picture
+    x0, y0, x1, y1 = box
+    n = 0
+    for y in range(max(0, y0), min(h, y1)):
+        row = y * w * 4
+        for x in range(max(0, x0), min(w, x1)):
+            if 30 < data[row + x * 4 + 3] < 200:
+                n += 1
+    return n
+
+
+def union_box(boxes):
+    return min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes)
+
+
+def eye(re4):
+    """Minecraft's camera (the player's eyes), which RE4's camera is in the fake level."""
+    pos = re4.bridge().get("pos") or {}
+    return pos.get("x", 0), pos.get("y", 0) + 1.62, pos.get("z", 0)
+
+
+def ack_blocks_only(re4):
+    """RE4 shows the blocks Minecraft exported (block textures), Minecraft keeps drawing every mob."""
+    assets = re4.read_json("minecraft_native_assets.json") or {}
+    exports = assets.get("exports") or {}
+    ids = [int(k) for k, e in exports.items() if (e.get("material") or "").startswith("minecraft/b_")]
+    re4.native_status = {"enabled": True, "acked": ids, "session": assets.get("session")}
+    return assets
+
+
 def native_parts(re4):
     """The parts in minecraft_native_poses.json, each as its 12 fields."""
     poses = re4.read_json("minecraft_native_poses.json") or {}
@@ -85,8 +117,9 @@ def block_id(x, y, z):
     return -1 - (packed & 0x7FFFFFFFFFFFFFFF)
 
 
-def block_box(picture, cam, yaw, fov, block, grow=2):
-    """Screen box around a whole block (all 8 corners) seen from a level camera turned by yaw, a little enlarged."""
+def block_box(picture, cam, yaw, fov, block, grow=2, top=False):
+    """Screen box around a whole block (all 8 corners), or only its top face, seen from a level camera turned by
+    yaw, a little enlarged."""
     _, w, h = picture
     tan_v = math.tan(math.radians(fov / 2))
     tan_h = tan_v * w / h
@@ -94,7 +127,7 @@ def block_box(picture, cam, yaw, fov, block, grow=2):
     forward, right = (-math.sin(y), math.cos(y)), (-math.cos(y), -math.sin(y))   # (x, z); Minecraft's yaw
     xs, ys = [], []
     for cx in (0, 1):
-        for cy in (0, 1):
+        for cy in ((1,) if top else (0, 1)):
             for cz in (0, 1):
                 dx, dy, dz = block[0] + cx - cam[0], block[1] + cy - cam[1], block[2] + cz - cam[2]
                 depth = dx * forward[0] + dz * forward[1]
@@ -205,11 +238,11 @@ def native_handoff(re4, mc):
 
 
 # The blocks native_blocks builds (name, whether RE4 is to show it, where: sideways and up from the player).
-# Biome-coloured leaves and see-through stained glass stay Minecraft's; glass is a cut-out block, so it goes to
-# RE4; the crafting table has four textures (top, front, side, planks below). Leaves kept from decaying.
+# Biome-coloured leaves, see-through stained glass and animated magma stay Minecraft's; glass is a cut-out block,
+# so it goes to RE4; the crafting table has four textures (top, front, side, planks below). Leaves kept from decaying.
 TEST_BLOCKS = [("stone", True, -6, 2), ("oak_planks", True, -4, 2), ("cobblestone", True, -2, 2), ("glass", True, 2, 2),
                ("oak_leaves[persistent=true]", False, 4, 2), ("white_stained_glass", False, 6, 2),
-               ("crafting_table", True, 0, 3)]
+               ("crafting_table", True, 0, 3), ("magma_block", False, -4, 4)]
 
 
 def tex_size(re4, material):
@@ -224,7 +257,8 @@ def tex_size(re4, material):
 
 def native_blocks(re4, mc):
     """Real RE4 blocks: plain blocks you built go to RE4 (each kind with its own small texture, under negative
-    numbers in the poses) and Minecraft draws the ones RE4 shows into depth only; the others it still draws."""
+    numbers in the poses) and Minecraft draws the ones RE4 shows into depth only; the others (biome-coloured,
+    see-through, animated) it still draws."""
     ensure_alive(re4)
     # Facing away from the fake level's raised floor (beyond z=204 in RE4), which would hide the blocks; they are
     # off the screen's centre (crosshair) and above the hand
@@ -287,14 +321,97 @@ def native_blocks(re4, mc):
                   texture_sizes=sizes, re4_spacing=spacing, overlay_pixels_before_after=pixels)
 
 
+def native_block_occlusion(re4, mc):
+    """Real RE4 blocks hide what is behind them: Minecraft draws the blocks RE4 shows into its depth only, so a mob
+    Minecraft still draws behind such a wall is hidden like behind RE4's own walls (and seen without the wall)."""
+    ensure_alive(re4)
+    re4.yaw, re4.pitch = 180.0, 0.0
+    re4.run_for(1.0)
+    cam = eye(re4)
+    bx, by, bz = math.floor(cam[0]), math.floor(cam[1] - 1.62), math.floor(cam[2])
+    # A stone wall 3 wide and 2 high, 6 ahead; an iron golem (2.7 tall, its head above the wall) 2.5 behind it
+    wall = [(x, y, bz - 6) for x in (bx - 5, bx - 4, bx - 3) for y in (by, by + 1)]
+    fill = f"/fill {bx - 5} {by} {bz - 6} {bx - 3} {by + 1} {bz - 6}"
+    run_commands(re4, ["/kill @e[type=iron_golem]", fill + " stone",
+                       f"/summon iron_golem {bx - 3.5} {by} {bz - 8.5} {{NoAI:1b,Rotation:[0f,0f],DeathLootTable:\"minecraft:empty\"}}"])
+    re4.native_status = {"enabled": True, "acked": [], "session": None}
+    re4.run_for(6.0)
+    sent = {int(p[0]) for p in native_parts(re4) if len(p) == 12}
+    wall_sent = sum(1 for b in wall if block_id(*b) in sent)
+    ack_blocks_only(re4)
+    re4.run_for(3.0)
+    pic = re4.overlay_picture()
+    wall_box = union_box([block_box(pic, cam, 180.0, re4.fov, b, grow=-3) for b in wall])
+    head = block_box(pic, cam, 180.0, re4.fov, (bx - 4, by + 2, bz - 9), grow=0)
+    head_box = (head[0], head[1], head[2], wall_box[1])   # above the wall only
+    wall_px, head_px = drawn_pixels(pic, wall_box), drawn_pixels(pic, head_box)
+    # without the wall the golem is seen there
+    run_commands(re4, [fill + " air"])
+    re4.run_for(1.5)
+    open_px = drawn_pixels(re4.overlay_picture(), wall_box)
+    re4.native_status = {"enabled": False, "acked": [], "session": None}
+    run_commands(re4, ["/kill @e[type=iron_golem]"])
+    re4.yaw = 0.0
+    ok = wall_sent == len(wall) and wall_px <= 5 and head_px > 50 and open_px > 100
+    return result("native_block_occlusion", ok, wall_blocks_sent=wall_sent, golem_pixels_behind_wall=wall_px,
+                  golem_head_pixels_above_wall=head_px, golem_pixels_without_wall=open_px)
+
+
+def native_block_shadow(re4, mc):
+    """Minecraft's round shadow of a mob RE4 shows is not drawn over the blocks RE4 shows (RE4 casts the mob's own
+    shadow there), but still on blocks Minecraft draws; a mob Minecraft draws keeps its shadow on RE4's blocks."""
+    ensure_alive(re4)
+    re4.yaw, re4.pitch = 180.0, 0.0
+    re4.run_for(1.0)
+    cam = eye(re4)
+    bx, by, bz = math.floor(cam[0]), math.floor(cam[1] - 1.62), math.floor(cam[2])
+    # A floor below the eyes, left of the hand: a row of stone (RE4's) and behind it a row of leaves (biome-coloured:
+    # Minecraft's; the shadow shows in their holes), and a pig over the line between them, its shadow on both. The
+    # pig (NoAI: it doesn't fall) floats a little above the floor, so its body doesn't hide its shadow from the eyes
+    stone = [(x, by, bz - 3) for x in (bx - 3, bx - 2, bx - 1)]
+    leaves = [(x, by, bz - 4) for x in (bx - 3, bx - 2, bx - 1)]
+    run_commands(re4, ["/kill @e[type=pig]", f"/fill {bx - 3} {by} {bz - 3} {bx - 1} {by} {bz - 3} stone",
+                       f"/fill {bx - 3} {by} {bz - 4} {bx - 1} {by} {bz - 4} oak_leaves[persistent=true]",
+                       f"/summon pig {bx - 1.5} {by + 1.6} {bz - 3.0} {{NoAI:1b,DeathLootTable:\"minecraft:empty\"}}"])
+    re4.native_status = {"enabled": True, "acked": [], "session": None}
+    re4.run_for(6.0)
+    # the pig is Minecraft's: its shadow on RE4's stone is the only one there
+    assets = ack_blocks_only(re4)
+    re4.run_for(3.0)
+    pic_mc_pig = re4.overlay_picture()
+    # the pig is RE4's too
+    re4.native_status = {"enabled": True, "acked": [int(k) for k in assets.get("exports") or {}], "session": assets.get("session")}
+    re4.run_for(3.0)
+    pic_re4_pig = re4.overlay_picture()
+    run_commands(re4, ["/kill @e[type=pig]"])
+    re4.run_for(2.5)
+    pic_no_pig = re4.overlay_picture()
+    re4.native_status = {"enabled": False, "acked": [], "session": None}
+    run_commands(re4, [f"/fill {bx - 3} {by} {bz - 4} {bx - 1} {by} {bz - 3} air"])
+    re4.yaw = 0.0
+    # Each row's top only (the chat and the hotbar further down are see-through too), a line apart
+    stone_box = union_box([block_box(pic_mc_pig, cam, 180.0, re4.fov, b, grow=0, top=True) for b in stone])
+    leaves_box = union_box([block_box(pic_mc_pig, cam, 180.0, re4.fov, b, grow=0, top=True) for b in leaves])
+    stone_box = (stone_box[0], stone_box[1] + 2, stone_box[2], stone_box[3])
+    leaves_box = (leaves_box[0], leaves_box[1], leaves_box[2], leaves_box[3] - 2)
+    mc_pig_on_stone = soft_pixels(pic_mc_pig, stone_box)
+    re4_pig_on_stone = soft_pixels(pic_re4_pig, stone_box)
+    re4_pig_on_leaves = soft_pixels(pic_re4_pig, leaves_box) - soft_pixels(pic_no_pig, leaves_box)
+    ok = mc_pig_on_stone > 200 and re4_pig_on_stone <= 5 and re4_pig_on_leaves > 50
+    return result("native_block_shadow", ok, minecraft_pig_shadow_on_re4_stone=mc_pig_on_stone,
+                  re4_pig_shadow_on_re4_stone=re4_pig_on_stone, re4_pig_shadow_on_minecraft_leaves=re4_pig_on_leaves)
+
+
 DEFAULT_SKINS = ["alex", "ari", "efe", "kai", "makena", "noor", "steve", "sunny", "zuri"]
 
 
 def native_player(re4, mc):
     """Your character in third person as real RE4 parts: the player model (drawn see-through, for the skin's
-    outer layer) goes to RE4 with its skin as the texture; back in first person its parts are no longer sent."""
+    outer layer) goes to RE4 with its skin as the texture, and once RE4 shows it Minecraft no longer draws the body
+    (armour it still does); back in first person its parts are no longer sent."""
     ensure_alive(re4)
-    re4.yaw, re4.pitch = 0.0, 0.0
+    # looking down: a chestplate is then well in the picture (RE4's camera is at the player's eyes in the fake level)
+    re4.yaw, re4.pitch = 0.0, 30.0
 
     def to_camera_mode(wanted):
         # RE4's perspective key, one press at a time (0 first person, 1 behind, 2 in front)
@@ -308,7 +425,8 @@ def native_player(re4, mc):
     third = to_camera_mode(1)
     re4.native_status = {"enabled": True, "acked": [], "session": None}
     re4.run_for(6.0)
-    exports = (re4.read_json("minecraft_native_assets.json") or {}).get("exports") or {}
+    assets = re4.read_json("minecraft_native_assets.json") or {}
+    exports = assets.get("exports") or {}
     me = re4.bridge().get("entity_id")
     mine = [p for p in native_parts(re4) if len(p) == 12 and me is not None and int(p[0]) == me]
     skins = {hashlib.sha1(f"minecraft:textures/entity/player/{m}/{n}.png".encode()).hexdigest()[:16]
@@ -318,14 +436,32 @@ def native_player(re4, mc):
         m = re.search(r"/t_([0-9a-f]{16})_r\d+\.mdf2$", (exports.get(export_id) or {}).get("material", ""))
         return m.group(1) if m else None
     with_skin = [p for p in mine if texture_hash(p[1]) in skins]
+    # RE4 shows the body: Minecraft stops drawing it (seen from inside the head, it fills the picture), but still
+    # draws a chestplate put on
+    pic_before = re4.overlay_picture()
+    re4.native_status = {"enabled": True, "acked": sorted({int(p[1]) for p in mine}), "session": assets.get("session")}
+    re4.run_for(3.0)
+    pic_acked = re4.overlay_picture()
+    run_commands(re4, ["/item replace entity @s armor.chest with iron_chestplate"])
+    re4.run_for(2.0)
+    pic_armour = re4.overlay_picture()
+    run_commands(re4, ["/item replace entity @s armor.chest with air"])
+    re4.native_status = {"enabled": True, "acked": [], "session": None}
+    re4.run_for(1.0)
+    w, h = pic_before[1], pic_before[2]
+    box = (0, 0, w, h // 2 + 60)   # above the chat lines and the hotbar
+    body_before, body_acked, armour = (drawn_pixels(p, box) for p in (pic_before, pic_acked, pic_armour))
+    re4.pitch = 0.0
     first = to_camera_mode(0)
     re4.run_for(1.0)
     gone = not any(len(p) == 12 and me is not None and int(p[0]) == me for p in native_parts(re4))
     re4.native_status = {"enabled": False, "acked": [], "session": None}
     re4.run_for(1.0)
-    ok = third and len(with_skin) >= 6 and first and gone
+    ok = (third and len(with_skin) >= 6 and body_before > 1000 and body_acked < 0.25 * body_before and armour > 1000
+          and first and gone)
     return result("native_player", ok, third_person=third, entity_id=me, parts_sent=len(mine),
-                  parts_with_skin_texture=len(with_skin), back_in_first_person=first, parts_gone_in_first_person=gone)
+                  parts_with_skin_texture=len(with_skin), overlay_pixels_before_acked_with_armour=(body_before, body_acked, armour),
+                  back_in_first_person=first, parts_gone_in_first_person=gone)
 
 
 def leon_damage(re4, mc):
@@ -413,4 +549,5 @@ def support_zip(re4, mc):
                   same_request_ignored=again, summary=summary.splitlines()[:3])
 
 
-ALL = [lockstep_camera, golem_fight, native_handoff, native_blocks, native_player, leon_damage, re4_stopped, support_zip]
+ALL = [lockstep_camera, golem_fight, native_handoff, native_blocks, native_block_occlusion, native_block_shadow, native_player,
+       leon_damage, re4_stopped, support_zip]

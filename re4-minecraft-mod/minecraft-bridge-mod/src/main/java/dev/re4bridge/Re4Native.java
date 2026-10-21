@@ -111,6 +111,8 @@ public final class Re4Native {
     private static Entity currentEntity = null;
     private static final Set<ModelPart> entityParts = Collections.newSetFromMap(new IdentityHashMap<>());   // this entity's, sent
     private static Vec3 frameOffset = null;          // camera-relative -> RE4 world
+    private static Vec3 frameCam = Vec3.ZERO;        // camera-relative -> Minecraft world
+    private static Set<BlockPos> shownBlocks = Set.of();   // built blocks RE4 shows this frame
     private static final StringBuilder frameParts = new StringBuilder();
     private static int framePartCount = 0;
     private static final Set<Integer> nativeEntities = new HashSet<>();   // some part shown by RE4 this frame
@@ -215,6 +217,8 @@ public final class Re4Native {
         framePartCount = 0;
         nativeEntities.clear();
         minecraftDrawn.clear();
+        shownBlocks = Set.of();
+        frameCam = cam;
         frameOffset = enabled() ? Re4Terrain.toRe4(cam.x, cam.y, cam.z) : null;
     }
 
@@ -436,6 +440,7 @@ public final class Re4Native {
         if (!shown.isEmpty()) {
             flushDepth();
         }
+        shownBlocks = shown;
         return shown;
     }
 
@@ -554,6 +559,11 @@ public final class Re4Native {
             if (quad.isTinted() || quad.getVertices().length != 32 || !InventoryMenu.BLOCK_ATLAS.equals(quad.getSprite().atlasLocation())) {
                 return null;
             }
+            // Animated textures (fire, lanterns, campfires, magma, sea lanterns...) stay Minecraft's too: RE4's copy
+            // would be one still frame
+            if (quad.getSprite().contents().getUniqueFrames().count() > 1) {
+                return null;
+            }
             if (!sprites.contains(quad.getSprite())) {
                 sprites.add(quad.getSprite());
             }
@@ -617,7 +627,7 @@ public final class Re4Native {
         if (!finite(positions) || !finite(uvs)) {
             return null;
         }
-        // Named by content: the same block from another resource pack (or animation frame) gets its own files
+        // Named by content: the same block from another resource pack gets its own files
         String meshName = "m_" + hash(positions, uvs) + "_r" + Re4NativeFiles.FORMAT_REV;
         String texName = "b_" + hashImage(sprites, image) + "_r" + Re4NativeFiles.FORMAT_REV;
         return new BlockFiles(meshName, texName, positions, geometry.normals(), uvs, image);
@@ -1008,6 +1018,7 @@ public final class Re4Native {
     private static final class TaggingSource implements MultiBufferSource {
         private final MultiBufferSource delegate;
         private final Map<RenderType, TaggedConsumer> wrappers = new IdentityHashMap<>();
+        private final ShadowFilter shadowFilter = new ShadowFilter();
 
         TaggingSource(MultiBufferSource delegate) {
             this.delegate = delegate;
@@ -1017,31 +1028,126 @@ public final class Re4Native {
         public VertexConsumer getBuffer(RenderType renderType) {
             TaggedConsumer w = wrappers.computeIfAbsent(renderType, TaggingSource::wrapperFor);
             w.delegate = delegate.getBuffer(renderType);
+            // Minecraft's round shadow of an entity RE4 shows (drawn after its model, so that is known by now):
+            // not on the blocks RE4 shows, RE4 casts the entity's shadow on those itself
+            if (w.shadow && currentEntity != null && !shownBlocks.isEmpty() && shownByRe4(currentEntity)) {
+                shadowFilter.start(w.delegate);
+                return shadowFilter;
+            }
             return w;
         }
 
         private static TaggedConsumer wrapperFor(RenderType renderType) {
             String s = renderType.toString();
+            if (s.startsWith("RenderType[entity_shadow")) {
+                return new TaggedConsumer(null, false, true);
+            }
             // Only the plain opaque entity render types (solid, cutout): see-through layers (slime jelly), glints,
             // outlines, glowing eyes and energy swirls keep Minecraft's drawing. Players are drawn see-through
             // (for their skin's outer layer): for them that one is taken too, cut out like the others
             boolean playersOnly = s.startsWith("RenderType[entity_translucent:");
             if (!playersOnly && !s.startsWith("RenderType[entity_solid") && !s.startsWith("RenderType[entity_cutout")) {
-                return new TaggedConsumer(null, false);
+                return new TaggedConsumer(null, false, false);
             }
             Matcher m = TEXTURE.matcher(s);
-            return new TaggedConsumer(m.find() ? m.group(1) : null, playersOnly);
+            return new TaggedConsumer(m.find() ? m.group(1) : null, playersOnly, false);
+        }
+    }
+
+    // Minecraft's round shadow without its quads on the blocks RE4 shows. The shadow comes as quads of 4 vertices
+    // (camera-relative), each lying on the top of one block
+    private static final class ShadowFilter implements VertexConsumer {
+        private VertexConsumer delegate;
+        private final float[] floats = new float[4 * 8];   // x y z u v nx ny nz per vertex
+        private final int[] ints = new int[4 * 3];         // colour, overlay, light per vertex
+        private int count = 0;
+
+        void start(VertexConsumer delegate) {
+            this.delegate = delegate;
+            count = 0;
+        }
+
+        @Override
+        public void addVertex(float x, float y, float z, int color, float u, float v, int overlay, int light, float nx, float ny, float nz) {
+            int f = count * 8, i = count * 3;
+            floats[f] = x;
+            floats[f + 1] = y;
+            floats[f + 2] = z;
+            floats[f + 3] = u;
+            floats[f + 4] = v;
+            floats[f + 5] = nx;
+            floats[f + 6] = ny;
+            floats[f + 7] = nz;
+            ints[i] = color;
+            ints[i + 1] = overlay;
+            ints[i + 2] = light;
+            if (++count < 4) {
+                return;
+            }
+            count = 0;
+            // The block the quad lies on: just under the quad's middle
+            BlockPos under = BlockPos.containing(
+                    (floats[0] + floats[8] + floats[16] + floats[24]) / 4.0 + frameCam.x,
+                    (floats[1] + floats[9] + floats[17] + floats[25]) / 4.0 + frameCam.y - 0.5,
+                    (floats[2] + floats[10] + floats[18] + floats[26]) / 4.0 + frameCam.z);
+            if (shownBlocks.contains(under)) {
+                return;
+            }
+            for (int k = 0; k < 4; k++) {
+                int a = k * 8, b = k * 3;
+                delegate.addVertex(floats[a], floats[a + 1], floats[a + 2], ints[b], floats[a + 3], floats[a + 4],
+                        ints[b + 1], ints[b + 2], floats[a + 5], floats[a + 6], floats[a + 7]);
+            }
+        }
+
+        // Anything drawn one vertex element at a time goes through as it is
+        @Override
+        public VertexConsumer addVertex(float x, float y, float z) {
+            delegate.addVertex(x, y, z);
+            return this;
+        }
+
+        @Override
+        public VertexConsumer setColor(int r, int g, int b, int a) {
+            delegate.setColor(r, g, b, a);
+            return this;
+        }
+
+        @Override
+        public VertexConsumer setUv(float u, float v) {
+            delegate.setUv(u, v);
+            return this;
+        }
+
+        @Override
+        public VertexConsumer setUv1(int u, int v) {
+            delegate.setUv1(u, v);
+            return this;
+        }
+
+        @Override
+        public VertexConsumer setUv2(int u, int v) {
+            delegate.setUv2(u, v);
+            return this;
+        }
+
+        @Override
+        public VertexConsumer setNormal(float x, float y, float z) {
+            delegate.setNormal(x, y, z);
+            return this;
         }
     }
 
     private static final class TaggedConsumer implements VertexConsumer, Tagged {
         private final String texture;
         private final boolean playersOnly;
+        final boolean shadow;   // Minecraft's round shadow under an entity
         VertexConsumer delegate;
 
-        TaggedConsumer(String texture, boolean playersOnly) {
+        TaggedConsumer(String texture, boolean playersOnly, boolean shadow) {
             this.texture = texture;
             this.playersOnly = playersOnly;
+            this.shadow = shadow;
         }
 
         @Override
